@@ -1,0 +1,38 @@
+2026-05-16 12:15:22  INFO      Config loaded — Port: 4002 (PAPER) | Rebal every 4d | Stop: 7.9% | Lookback: 180d / skip 20d
+2026-05-16 12:15:22  INFO      Universe: 119 unique tickers across 6 sectors.
+2026-05-16 12:15:22  INFO      Katana-1 starting up ...
+2026-05-16 12:15:22  INFO      Connecting to IB Gateway 127.0.0.1:4002 (attempt 1) ...
+2026-05-16 12:15:22  INFO      Connecting to 127.0.0.1:4002 with clientId 1...
+2026-05-16 12:15:22  INFO      Connected
+2026-05-16 12:15:22  INFO      Logged on to server version 176
+2026-05-16 12:15:22  INFO      API connection ready
+2026-05-16 12:15:22  INFO      Warning 2104, reqId -1: Market data farm connection is OK:usfarm
+2026-05-16 12:15:22  INFO      Warning 2107, reqId -1: HMDS data farm connection is inactive but should be available upon demand.ushmds
+2026-05-16 12:15:22  INFO      Warning 2158, reqId -1: Sec-def data farm connection is OK:secdefnj
+2026-05-16 12:15:22  INFO      Synchronization complete
+2026-05-16 12:15:22  INFO      Connected to IB Gateway.
+2026-05-16 12:15:22  INFO      Qualifying 120 contracts ...
+2026-05-16 12:15:24  ERROR     Error 200, reqId 19: No security definition has been found for the request, contract: Stock(symbol='CFLT', exchange='SMART', currency='USD')
+2026-05-16 12:15:24  ERROR     IB error 200 (CFLT): No security definition has been found for the request
+2026-05-16 12:15:25  WARNING   Unknown contract: Stock(symbol='CFLT', exchange='SMART', currency='USD')
+2026-05-16 12:15:27  ERROR     Error 200, reqId 71: No security definition has been found for the request, contract: Stock(symbol='PSTG', exchange='SMART', currency='USD')
+2026-05-16 12:15:27  ERROR     IB error 200 (PSTG): No security definition has been found for the request
+2026-05-16 12:15:27  ERROR     Error 200, reqId 79: No security definition has been found for the request, contract: Stock(symbol='JNPR', exchange='SMART', currency='USD')
+2026-05-16 12:15:27  ERROR     IB error 200 (JNPR): No security definition has been found for the request
+2026-05-16 12:15:27  ERROR     Error 200, reqId 86: No security definition has been found for the request, contract: Stock(symbol='ABB', exchange='SMART', currency='USD')
+2026-05-16 12:15:27  ERROR     IB error 200 (ABB): No security definition has been found for the request
+2026-05-16 12:15:28  WARNING   Unknown contract: Stock(symbol='PSTG', exchange='SMART', currency='USD')
+2026-05-16 12:15:28  WARNING   Unknown contract: Stock(symbol='JNPR', exchange='SMART', currency='USD')
+2026-05-16 12:15:28  WARNING   Unknown contract: Stock(symbol='ABB', exchange='SMART', currency='USD')
+2026-05-16 12:15:30  ERROR     Error 200, reqId 109: No security definition has been found for the request, contract: Stock(symbol='ASTR', exchange='SMART', currency='USD')
+2026-05-16 12:15:30  ERROR     IB error 200 (ASTR): No security definition has been found for the request
+2026-05-16 12:15:30  ERROR     Error 200, reqId 113: No security definition has been found for the request, contract: Stock(symbol='VORB', exchange='SMART', currency='USD')
+2026-05-16 12:15:30  ERROR     IB error 200 (VORB): No security definition has been found for the request
+2026-05-16 12:15:31  WARNING   Unknown contract: Stock(symbol='ASTR', exchange='SMART', currency='USD')
+2026-05-16 12:15:31  WARNING   Unknown contract: Stock(symbol='VORB', exchange='SMART', currency='USD')
+2026-05-16 12:15:32  INFO      114 contracts qualified. Universe: 119 tickers.
+2026-05-16 12:15:32  INFO      Event loop active — waiting for market events ...
+2026-05-16 12:22:15  INFO      Shutdown requested by user.
+2026-05-16 12:22:15  INFO      Disconnecting from 127.0.0.1:4002, 5.72 kB sent in 128 messages, 156 kB received in 598 messages, session time 413 s.
+2026-05-16 12:22:15  INFO      Disconnecting
+2026-05-16 12:22:15  WARNING   IB Gateway disconnected.
