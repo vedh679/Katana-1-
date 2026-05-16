@@ -4,8 +4,10 @@ Katana-1: Cross-Sectional Sharpe Momentum Strategy
 Live / Paper trading via Interactive Brokers Gateway (ib_insync)
 All historical and current price data sourced directly from IB.
 
+Edit config.py to change parameters, universe, or IB connection settings.
+
 NOTE: IB allows max 60 historical-data requests per 10-minute window.
-      With ~82 universe symbols, the history fetch takes ~16 minutes
+      With ~82 universe symbols the history fetch takes ~16 minutes
       (12 s pacing between requests). This runs once per rebalance cycle.
 
 Run:  python main.py
@@ -23,6 +25,8 @@ import numpy as np
 import pandas as pd
 import pytz
 from ib_insync import IB, Stock, MarketOrder, util
+
+import config
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -44,100 +48,68 @@ class KatanaStrategy:
     Cross-Sectional Sharpe Momentum Strategy
     Sectors: AI Software, Chip Manufacturing, Neocloud, Hyperscalers, Robotics, Space Tech
 
-    Signal:  Sharpe-ratio momentum (mean daily return / std) over 180-day lookback, 20-day skip
-    Select:  Top 80th percentile, minimum 5 stocks required
-    Weight:  Inverse volatility, capped at 20% per position
-    Rebal:   Every 4 calendar days with 10% score buffer to reduce churn
-    Filter:  $5 minimum price, $1M minimum daily dollar volume
-    Risk:    SPY 200-day MA regime filter + trailing stop-loss + re-entry cooldown
+    Signal:  Sharpe-ratio momentum (mean daily return / std) over LOOKBACK days, skip SKIP days
+    Select:  Top (1 - PERCENTILE), minimum MIN_HOLDINGS stocks required
+    Weight:  Inverse volatility, capped at MAX_WEIGHT per position
+    Rebal:   Every REBALANCE_EVERY_DAYS calendar days with BUFFER score advantage for incumbents
+    Filter:  MIN_PRICE minimum price, MIN_VOLUME minimum daily dollar volume
+    Risk:    SPY 200-day MA regime filter + TRAILING_STOP + COOLDOWN_DAYS re-entry cooldown
+
+    All parameters are read from config.py at startup.
     """
-
-    # ════════════════════════════════════════════════════════════════════════
-    # ██  USER-CONFIGURABLE PARAMETERS  ██████████████████████████████████████
-    # ════════════════════════════════════════════════════════════════════════
-
-    # How many calendar days between scheduled rebalances
-    # Examples: 7 = weekly | 14 = fortnightly | 30 = monthly
-    REBALANCE_EVERY_DAYS    = 4
-
-    # Trailing stop: exit when price drops this far below its rolling peak
-    # e.g. 0.079 = exit if price falls 7.9% from highest point since entry
-    TRAILING_STOP           = 0.079
-
-    # Calendar days freed capital waits before being reallocated after a stop-loss
-    # 0 = same day | 5 = approaching next weekly rebal
-    REALLOCATION_DELAY_DAYS = 5
-
-    # Calendar days a stopped-out stock must wait before it can re-enter
-    COOLDOWN_DAYS           = 7
-
-    # ════════════════════════════════════════════════════════════════════════
-    # ██  STRATEGY PARAMETERS  ███████████████████████████████████████████████
-    # ════════════════════════════════════════════════════════════════════════
-    LOOKBACK        = 180       # momentum lookback (trading days)
-    SKIP            = 20        # skip most recent N days
-    PERCENTILE      = 0.80      # select top 20% by Sharpe momentum
-    MIN_HOLDINGS    = 5         # minimum stocks required to trade
-    MAX_WEIGHT      = 0.20      # max allocation per position (20%)
-    MIN_PRICE       = 5.0       # minimum entry price filter
-    MIN_VOLUME      = 1_000_000 # minimum daily dollar volume filter
-    BUFFER          = 0.10      # score buffer: incumbent replaced only if
-                                # newcomer scores >10% higher
-
-    # ── IB Gateway connection ─────────────────────────────────────────────
-    IB_HOST         = "127.0.0.1"
-    IB_PORT         = 4002      # 4001 = live trading  |  4002 = paper trading
-    IB_CLIENT_ID    = 1
-    RECONNECT_DELAY = 30        # seconds between reconnect attempts
-
-    # ── Sector Universe ───────────────────────────────────────────────────
-    AI_SOFTWARE = [
-        "MSFT", "GOOGL", "META", "IBM", "CRM", "PLTR", "AI", "BBAI",
-        "SOUN", "AMBA", "PATH", "GTLB", "MDB", "SNOW", "DDOG",
-        "NET", "CFLT", "HUBS", "ZS",
-    ]
-    CHIPS = [
-        "NVDA", "AMD", "INTC", "AVGO", "QCOM", "TXN", "AMAT", "LRCX",
-        "KLAC", "ASML", "TSM", "MU", "MRVL", "NXPI", "SWKS", "QRVO",
-        "MPWR", "ENTG", "MKSI", "CRUS", "ACLS", "ONTO", "UCTT", "AMKR",
-        "GFS", "NVMI", "AXTI", "IPGP", "COHR", "VIAV", "MTSI", "ALAB",
-        "AAOI", "CAMT", "FN", "LITE",
-    ]
-    NEOCLOUD = [
-        "APLD", "CORZ", "CLSK", "HUT", "MARA", "RIOT", "BTBT", "CIFR",
-        "WULF", "IREN", "VRT", "SMCI", "NTAP", "PSTG", "STX", "WDC",
-    ]
-    HYPERSCALERS = [
-        "AMZN", "GOOG", "MSFT", "META", "ORCL", "IBM", "CSCO", "ANET",
-        "JNPR", "CALX", "NTAP", "GLW", "APH", "BDC", "FLEX",
-    ]
-    ROBOTICS = [
-        "ISRG", "ABB", "ROK", "EMR", "HON", "ETN", "DOV", "HUBB",
-        "TT", "GEV", "CAT", "MOD", "GNRC", "NVT", "FIX", "IESC",
-        "EME", "PWR", "J", "TER", "ONTO",
-    ]
-    SPACE_ENERGY = [
-        "RKLB", "SPCE", "ASTS", "MNTS", "ASTR", "RDW", "PL", "BKSY",
-        "VORB", "NEE", "DUK", "SO", "PCG", "AES", "OKLO", "SMR", "LEU",
-    ]
 
     # ════════════════════════════════════════════════════════════════════════
     # INIT
     # ════════════════════════════════════════════════════════════════════════
     def __init__(self):
         self.ib = IB()
+        self._load_config()
         self._build_universe()
         self._init_state()
         self._register_ib_callbacks()
 
+    def _load_config(self):
+        """Read all parameters from config.py into instance attributes."""
+        # IB connection
+        self.IB_HOST         = config.IB_HOST
+        self.IB_PORT         = config.IB_PORT
+        self.IB_CLIENT_ID    = config.IB_CLIENT_ID
+        self.RECONNECT_DELAY = config.RECONNECT_DELAY
+        # Rebalancing
+        self.REBALANCE_EVERY_DAYS    = config.REBALANCE_EVERY_DAYS
+        # Risk
+        self.TRAILING_STOP           = config.TRAILING_STOP
+        self.REALLOCATION_DELAY_DAYS = config.REALLOCATION_DELAY_DAYS
+        self.COOLDOWN_DAYS           = config.COOLDOWN_DAYS
+        # Signal
+        self.LOOKBACK    = config.LOOKBACK
+        self.SKIP        = config.SKIP
+        # Construction
+        self.PERCENTILE   = config.PERCENTILE
+        self.MIN_HOLDINGS = config.MIN_HOLDINGS
+        self.MAX_WEIGHT   = config.MAX_WEIGHT
+        self.BUFFER       = config.BUFFER
+        # Filters
+        self.MIN_PRICE  = config.MIN_PRICE
+        self.MIN_VOLUME = config.MIN_VOLUME
+
+        log.info(
+            f"Config loaded — "
+            f"Port: {self.IB_PORT} ({'PAPER' if self.IB_PORT == 4002 else 'LIVE'}) | "
+            f"Rebal every {self.REBALANCE_EVERY_DAYS}d | "
+            f"Stop: {self.TRAILING_STOP:.1%} | "
+            f"Lookback: {self.LOOKBACK}d / skip {self.SKIP}d"
+        )
+
     def _build_universe(self):
         raw = list(dict.fromkeys(
-            self.AI_SOFTWARE + self.CHIPS + self.NEOCLOUD +
-            self.HYPERSCALERS + self.ROBOTICS + self.SPACE_ENERGY
+            config.AI_SOFTWARE + config.CHIPS + config.NEOCLOUD +
+            config.HYPERSCALERS + config.ROBOTICS + config.SPACE_ENERGY
         ))
         self.all_tickers: List[str] = raw
         self.contracts: Dict[str, Stock] = {t: Stock(t, "SMART", "USD") for t in raw}
         self.contracts["SPY"] = Stock("SPY", "SMART", "USD")
+        log.info(f"Universe: {len(raw)} unique tickers across 6 sectors.")
 
     def _init_state(self):
         self._peak_prices:      Dict[str, float] = {}
@@ -146,10 +118,10 @@ class KatanaStrategy:
         self._current_holdings: Set[str]          = set()
         self._next_rebal_date:  Optional[date]    = None
         self._last_log_date:    Optional[date]    = None
-        self._stop_checked_today   = False
-        self._daily_checked_today  = False
+        self._stop_checked_today  = False
+        self._daily_checked_today = False
         self._last_event_date: Optional[date]     = None
-        # IB historical data cache (populated by _fetch_universe_history)
+        # IB historical data caches (populated by _fetch_universe_history)
         self._close_cache:  pd.DataFrame = pd.DataFrame()
         self._volume_cache: pd.DataFrame = pd.DataFrame()
 
@@ -164,9 +136,8 @@ class KatanaStrategy:
         log.warning("IB Gateway disconnected.")
 
     def _on_ib_error(self, reqId, errorCode, errorString, contract):
-        # Suppress routine informational codes
         if errorCode in {2104, 2106, 2107, 2108, 2158, 2100}:
-            return
+            return   # suppress routine farm/connectivity info messages
         if errorCode in (1100, 2110):
             log.warning(f"IB connectivity lost  [{errorCode}]: {errorString}")
         elif errorCode == 1102:
@@ -204,8 +175,8 @@ class KatanaStrategy:
     def _reconnect_loop(self):
         """
         Block here retrying until IB Gateway comes back.
-        Called from inside _event_loop when a disconnect is detected.
-        All strategy state (holdings, peaks, cooldowns) is preserved in memory.
+        All strategy state (holdings, peaks, cooldowns) is preserved in memory
+        across the outage — the strategy resumes exactly where it left off.
         """
         try:
             self.ib.disconnect()
@@ -254,8 +225,8 @@ class KatanaStrategy:
 
     def _sync_state_from_ib(self):
         """
-        On startup, seed _current_holdings from existing IB positions so the
-        strategy is aware of positions that were already open before this run.
+        On startup, seed _current_holdings from any existing IB positions so
+        the strategy is aware of trades placed in a previous run.
         Peak prices are set to current price (conservative: no immediate stop).
         """
         positions = self._positions()
@@ -287,7 +258,7 @@ class KatanaStrategy:
         return {p.contract.symbol: float(p.position) for p in self.ib.positions()}
 
     def _snapshot_prices(self, tickers: List[str]) -> Dict[str, float]:
-        """One-shot snapshot of last/close price for each ticker via IB."""
+        """One-shot IB snapshot of last/close price for each ticker."""
         contracts = [self.contracts[t] for t in tickers if t in self.contracts]
         if not contracts:
             return {}
@@ -373,15 +344,11 @@ class KatanaStrategy:
         """
         Pull split/dividend-adjusted daily OHLCV from IB for every universe
         ticker plus SPY.  Results are cached in self._close_cache and
-        self._volume_cache for use by momentum scoring, liquidity filter,
-        SPY regime check, and order sizing.
+        self._volume_cache.
 
         IB pacing rule: max 60 historical-data requests per 10-minute window.
         We sleep 12 s between requests → ~54 req/10 min (safe margin).
-        For ~82 symbols this takes roughly 16 minutes; it runs only once per
-        rebalance cycle (every 4 calendar days).
         """
-        # Convert trading days → IB duration string (calendar-day basis)
         cal_days = math.ceil(trading_days * 365 / 252) + 30
         years    = max(1, math.ceil(cal_days / 365))
         duration = f"{years} Y"
@@ -406,7 +373,7 @@ class KatanaStrategy:
             try:
                 bars = self.ib.reqHistoricalData(
                     self.contracts[ticker],
-                    endDateTime    = "",          # up to now
+                    endDateTime    = "",
                     durationStr    = duration,
                     barSizeSetting = "1 day",
                     whatToShow     = "ADJUSTED_LAST",
@@ -417,7 +384,7 @@ class KatanaStrategy:
                 if bars:
                     _raw = util.df(bars)
                     df   = _raw.set_index(pd.to_datetime(_raw["date"]))
-                    all_close[ticker]  = df["close"]
+                    all_close[ticker] = df["close"]
                     if "volume" in df.columns:
                         all_volume[ticker] = df["volume"]
                     log.info(f"  [{i+1}/{n}] {ticker}: {len(bars)} bars")
@@ -426,9 +393,8 @@ class KatanaStrategy:
             except Exception as e:
                 log.warning(f"  [{i+1}/{n}] {ticker}: {e}")
 
-            # Respect IB pacing limit between every request
             if i < n - 1:
-                self.ib.sleep(12)
+                self.ib.sleep(12)   # IB pacing: max 60 req / 10 min
 
         self._close_cache = (
             pd.DataFrame(all_close).dropna(how="all")
@@ -444,7 +410,6 @@ class KatanaStrategy:
         )
 
     def _cached_close(self, tickers: List[str]) -> pd.DataFrame:
-        """Return the close-price cache filtered to the requested tickers."""
         if self._close_cache.empty:
             return pd.DataFrame()
         valid = [t for t in tickers if t in self._close_cache.columns]
@@ -473,12 +438,11 @@ class KatanaStrategy:
             return
 
         today     = self._today_et()
-        holdings  = list(self._current_holdings)
-        prices    = self._snapshot_prices(holdings)
+        prices    = self._snapshot_prices(list(self._current_holdings))
         positions = self._positions()
         to_exit   = []
 
-        for ticker in holdings:
+        for ticker in list(self._current_holdings):
             if positions.get(ticker, 0) == 0:
                 continue
             current = prices.get(ticker) or self._single_price(ticker)
@@ -496,32 +460,25 @@ class KatanaStrategy:
 
         for ticker, peak, current, drawdown in to_exit:
             self._liquidate(ticker, positions)
-
-            cooldown_end = today + timedelta(days=self.COOLDOWN_DAYS)
-            realloc_date = today + timedelta(days=self.REALLOCATION_DELAY_DAYS)
-            self._cooldown_until[ticker]  = cooldown_end
-            self._pending_realloc[ticker] = realloc_date
-
+            self._cooldown_until[ticker]  = today + timedelta(days=self.COOLDOWN_DAYS)
+            self._pending_realloc[ticker] = today + timedelta(days=self.REALLOCATION_DELAY_DAYS)
             self._current_holdings.discard(ticker)
             self._peak_prices.pop(ticker, None)
-
             log.warning(
                 f"TRAILING STOP | {ticker} | "
                 f"Peak ${peak:.2f} → Now ${current:.2f} | "
                 f"Drawdown {drawdown*100:.1f}% | "
-                f"Cooldown until {cooldown_end} | "
-                f"Realloc from {realloc_date}"
+                f"Cooldown until {self._cooldown_until[ticker]} | "
+                f"Realloc from {self._pending_realloc.get(ticker)}"
             )
 
     # ════════════════════════════════════════════════════════════════════════
     # 2. DAILY CHECK  (daily, 10:00 AM ET)
-    #    Updates peak prices, triggers rebalance if due, else processes reallocs
     # ════════════════════════════════════════════════════════════════════════
     def _daily_check(self):
         log.info("── Daily check ──────────────────────────────────────")
         today = self._today_et()
 
-        # Keep peak prices current for all held positions
         if self._current_holdings:
             prices    = self._snapshot_prices(list(self._current_holdings))
             positions = self._positions()
@@ -541,7 +498,6 @@ class KatanaStrategy:
 
     # ════════════════════════════════════════════════════════════════════════
     # 3. PENDING REALLOCATION
-    #    Redistributes freed stop-loss capital to remaining active holdings
     # ════════════════════════════════════════════════════════════════════════
     def _process_pending_reallocations(self, today: date):
         due = [t for t, d in self._pending_realloc.items() if today >= d]
@@ -595,7 +551,7 @@ class KatanaStrategy:
         # Pull fresh adjusted-close + volume history from IB for all symbols
         self._fetch_universe_history(lookback_total)
 
-        # SPY regime uses the cache (SPY was fetched inside _fetch_universe_history)
+        # SPY 200-day MA regime filter (SPY included in the fetch above)
         bullish       = self._spy_is_bullish()
         cash_fraction = 0.0 if bullish else 0.5
 
@@ -612,8 +568,7 @@ class KatanaStrategy:
             self._liquidate_all()
             return
 
-        # Liquidity filter: price from cache (last adjusted close), volume from cache
-        # Cooldown block also applied here
+        # Liquidity filter (price + volume from cache) + cooldown block
         volumes = self._get_avg_dollar_volume(list(scores.keys()))
         scores = {
             t: sc for t, sc in scores.items()
@@ -674,12 +629,12 @@ class KatanaStrategy:
                 self._peak_prices.pop(ticker, None)
                 self._pending_realloc.pop(ticker, None)
 
-        self.ib.sleep(2)              # let sell orders settle
+        self.ib.sleep(2)
         pv        = self._portfolio_value()
         positions = self._positions()
         prices_all = self._snapshot_prices(list(final_selected))
 
-        # Enter / adjust
+        # Enter / adjust positions
         for ticker in final_selected:
             w = weights.get(ticker, 0.0)
             if w <= 0:
@@ -695,13 +650,13 @@ class KatanaStrategy:
         for t in final_selected:
             self._pending_realloc.pop(t, None)
 
-        # Monthly log
+        # Monthly status log
         if self._last_log_date is None or today.month != self._last_log_date.month:
             self._last_log_date = today
-            pv_now   = self._portfolio_value()
-            regime   = "BULL" if bullish else "BEAR (50% cash)"
-            top3     = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:3]
-            top3_str = ", ".join(f"{t}:{sc:.3f}" for t, sc in top3)
+            pv_now    = self._portfolio_value()
+            regime    = "BULL" if bullish else "BEAR (50% cash)"
+            top3      = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:3]
+            top3_str  = ", ".join(f"{t}:{sc:.3f}" for t, sc in top3)
             cooldowns = {t: str(d) for t, d in self._cooldown_until.items() if d > today}
             log.info(
                 f"{today} | Regime: {regime} | Value: ${pv_now:,.0f} | "
@@ -714,7 +669,7 @@ class KatanaStrategy:
     # HELPERS  (identical logic to the QuantConnect version)
     # ════════════════════════════════════════════════════════════════════════
     def _spy_is_bullish(self) -> bool:
-        """SPY 200-day MA regime filter — uses the already-fetched IB cache."""
+        """SPY 200-day MA regime filter using the IB history cache."""
         if "SPY" in self._close_cache.columns:
             c = self._close_cache["SPY"].dropna().values
             if len(c) >= 200:
@@ -779,7 +734,7 @@ class KatanaStrategy:
         return self._now_et().date()
 
     def _is_weekday(self, d: date) -> bool:
-        return d.weekday() < 5   # Mon=0 … Fri=4  (holidays not filtered)
+        return d.weekday() < 5   # Mon=0 … Fri=4
 
     # ════════════════════════════════════════════════════════════════════════
     # MAIN RUN LOOP — 24/7, reconnects automatically on IB Gateway restart
@@ -788,9 +743,9 @@ class KatanaStrategy:
         """
         Entry point. Runs forever. Handles:
           - Initial connection (retries until Gateway is up)
-          - Automatic reconnection when Gateway does its daily restart (~11:45 PM ET)
-          - All strategy state is preserved in memory across reconnections
-          - Catches up on any scheduled events missed during a disconnect
+          - Automatic reconnection on the IB Gateway daily restart (~11:45 PM ET)
+          - All strategy state preserved in memory across disconnects
+          - Catch-up on any scheduled events missed during an outage
         """
         log.info("Katana-1 starting up ...")
         while True:
@@ -816,20 +771,16 @@ class KatanaStrategy:
     def _event_loop(self):
         """
         Core tick loop (1 s resolution).
-        Detects disconnects and calls _reconnect_loop() in place so strategy
-        state is never lost. After reconnect, resumes exactly where it left off,
-        including catching up on any events that fired during the outage.
+        Detects disconnects and calls _reconnect_loop() inline so strategy
+        state is never lost. After reconnect, catches up on any missed events.
         """
         log.info("Event loop active — waiting for market events ...")
         while True:
-            # ── Connection health ──────────────────────────────────────────
             if not self.ib.isConnected():
                 log.warning("IB connection lost — entering reconnect loop ...")
                 self._reconnect_loop()
-                # After reconnect, state is intact. Continue the loop normally.
                 continue
 
-            # ── Let ib_insync process its internal message queue ───────────
             try:
                 self.ib.sleep(1)
             except Exception as e:
@@ -837,11 +788,9 @@ class KatanaStrategy:
                 self._reconnect_loop()
                 continue
 
-            # ── Scheduling ─────────────────────────────────────────────────
             now   = self._now_et()
             today = now.date()
 
-            # Reset flags at midnight
             if self._last_event_date != today:
                 self._stop_checked_today  = False
                 self._daily_checked_today = False
@@ -851,12 +800,11 @@ class KatanaStrategy:
                 continue
 
             market_open      = now.replace(hour=9, minute=30, second=0, microsecond=0)
-            stop_check_time  = market_open + timedelta(minutes=10)  # 9:40 AM ET
-            daily_check_time = market_open + timedelta(minutes=30)  # 10:00 AM ET
+            stop_check_time  = market_open + timedelta(minutes=10)   # 9:40 AM ET
+            daily_check_time = market_open + timedelta(minutes=30)   # 10:00 AM ET
 
-            # Trailing stop check — 9:40 AM ET
-            # If we were offline at 9:40 and reconnect at e.g. 9:55,
-            # the flag is still False so it runs immediately on catch-up.
+            # If offline at 9:40 and reconnect at e.g. 9:55, flag is still False
+            # so both events fire immediately on catch-up.
             if not self._stop_checked_today and now >= stop_check_time:
                 try:
                     self._check_trailing_stops()
@@ -865,7 +813,6 @@ class KatanaStrategy:
                 finally:
                     self._stop_checked_today = True
 
-            # Daily check (rebalance / realloc) — 10:00 AM ET
             if not self._daily_checked_today and now >= daily_check_time:
                 try:
                     self._daily_check()
