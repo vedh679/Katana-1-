@@ -14,6 +14,7 @@ Run:  python main.py
 Stop: Ctrl+C
 """
 
+import atexit
 import logging
 import math
 import sys
@@ -159,6 +160,15 @@ class KatanaStrategy:
             log.warning(f"IB connectivity lost  [{errorCode}]: {errorString}")
         elif errorCode == 1102:
             log.info(f"IB connectivity restored [{errorCode}]: {errorString}")
+        elif errorCode == 326:
+            log.warning(
+                f"ClientId {self.IB_CLIENT_ID} already in use — another session is still active. "
+                f"Close all other IB Gateway / TWS windows, then retry."
+            )
+        elif errorCode == 10197:
+            sym = contract.symbol if contract else "—"
+            log.warning(f"No market data ({sym}) — competing IB session detected. "
+                        f"Close all other Gateway/TWS instances.")
         else:
             sym = contract.symbol if contract else "—"
             log.error(f"IB error {errorCode} ({sym}): {errorString}")
@@ -166,11 +176,19 @@ class KatanaStrategy:
     # ════════════════════════════════════════════════════════════════════════
     # CONNECTION
     # ════════════════════════════════════════════════════════════════════════
+    def _disconnect_safe(self):
+        """Disconnect silently — safe to call even if already disconnected."""
+        try:
+            self.ib.disconnect()
+        except Exception:
+            pass
+
     def _connect(self):
         """Connect to IB Gateway, retrying indefinitely until successful."""
         attempt = 0
         while True:
             attempt += 1
+            self._disconnect_safe()   # clear any lingering session before each attempt
             try:
                 log.info(
                     f"Connecting to IB Gateway {self.IB_HOST}:{self.IB_PORT} "
@@ -195,15 +213,13 @@ class KatanaStrategy:
         All strategy state (holdings, peaks, cooldowns) is preserved in memory
         across the outage — the strategy resumes exactly where it left off.
         """
-        try:
-            self.ib.disconnect()
-        except Exception:
-            pass
+        self._disconnect_safe()
         attempt = 0
         while True:
             attempt += 1
             log.info(f"Reconnect attempt {attempt} — waiting {self.RECONNECT_DELAY}s ...")
             time.sleep(self.RECONNECT_DELAY)
+            self._disconnect_safe()   # ensure clean slate before each attempt
             try:
                 self.ib.connect(
                     self.IB_HOST, self.IB_PORT,
@@ -817,6 +833,9 @@ class KatanaStrategy:
           - All strategy state preserved in memory across disconnects
           - Catch-up on any scheduled events missed during an outage
         """
+        # Guarantee disconnect on any exit — crash, kill signal, or normal stop
+        atexit.register(self._disconnect_safe)
+
         log.info("Katana-1 starting up ...")
         while True:
             try:
@@ -824,10 +843,7 @@ class KatanaStrategy:
                 self._event_loop()
             except KeyboardInterrupt:
                 log.info("Shutdown requested by user.")
-                try:
-                    self.ib.disconnect()
-                except Exception:
-                    pass
+                self._disconnect_safe()
                 sys.exit(0)
             except Exception as e:
                 log.error(f"Unhandled error: {e}", exc_info=True)
