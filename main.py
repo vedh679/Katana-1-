@@ -246,22 +246,20 @@ class KatanaStrategy:
     # PORTFOLIO / PRICE HELPERS
     # ════════════════════════════════════════════════════════════════════════
     def _portfolio_value(self) -> float:
-        # Try USD first, then BASE (paper accounts sometimes use BASE currency)
-        for currency in ("USD", "BASE"):
-            for av in self.ib.accountValues():
-                if av.tag == "NetLiquidation" and av.currency == currency:
-                    try:
-                        v = float(av.value)
-                        if v > 0:
-                            return v
-                    except ValueError:
-                        pass
-        # Still empty — log what's available for diagnosis
+        # Retry up to 10 s — account data stream may still be arriving
+        for attempt in range(10):
+            for currency in ("USD", "BASE"):
+                for av in self.ib.accountValues():
+                    if av.tag == "NetLiquidation" and av.currency == currency:
+                        try:
+                            v = float(av.value)
+                            if v > 0:
+                                return v
+                        except ValueError:
+                            pass
+            self.ib.sleep(1)
         available = [(av.tag, av.currency, av.value) for av in self.ib.accountValues()]
-        if available:
-            log.warning(f"NetLiquidation not found. Sample tags: {available[:5]}")
-        else:
-            log.warning("accountValues() cache is empty — IB account data not yet received.")
+        log.warning(f"NetLiquidation not found after 10s. Available tags: {available[:8]}")
         return 0.0
 
     def _positions(self) -> Dict[str, float]:
