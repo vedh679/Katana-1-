@@ -60,7 +60,7 @@ MIN_VOLUME = 1_000_000      # minimum average daily dollar volume ($)
 AI_SOFTWARE = [
     "MSFT", "GOOGL", "META", "IBM", "CRM", "PLTR", "AI", "BBAI",
     "SOUN", "AMBA", "PATH", "GTLB", "MDB", "SNOW", "DDOG",
-    "NET", "CFLT", "HUBS", "ZS",
+    "NET", "HUBS", "ZS",
 ]
 
 CHIPS = [
@@ -73,7 +73,7 @@ CHIPS = [
 
 NEOCLOUD = [
     "APLD", "CORZ", "CLSK", "HUT", "MARA", "RIOT", "BTBT", "CIFR",
-    "WULF", "IREN", "VRT", "SMCI", "NTAP", "PSTG", "STX", "WDC",
+    "WULF", "IREN", "VRT", "SMCI", "NTAP", "STX", "WDC",
 ]
 
 HYPERSCALERS = [
@@ -82,12 +82,12 @@ HYPERSCALERS = [
 ]
 
 ROBOTICS = [
-    "ISRG", "ABB", "ROK", "EMR", "HON", "ETN", "DOV", "HUBB",
+    "ISRG", "ROK", "EMR", "HON", "ETN", "DOV", "HUBB",
     "TT", "GEV", "CAT", "MOD", "GNRC", "NVT", "FIX", "IESC",
     "EME", "PWR", "J", "TER", "ONTO",
 ]
 
 SPACE_ENERGY = [
-    "RKLB", "SPCE", "ASTS", "MNTS", "ASTR", "RDW", "PL", "BKSY",
+    "RKLB", "SPCE", "ASTS", "MNTS", "RDW", "PL", "BKSY",
     "NEE", "DUK", "SO", "PCG", "AES", "OKLO", "SMR", "LEU",
 ]
