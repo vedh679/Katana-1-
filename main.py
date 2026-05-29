@@ -229,6 +229,10 @@ class KatanaStrategy:
         the strategy is aware of trades placed in a previous run.
         Peak prices are set to current price (conservative: no immediate stop).
         """
+        # Subscribe to account updates and wait for the cache to populate
+        self.ib.reqAccountUpdates(True)
+        self.ib.sleep(2)
+
         positions = self._positions()
         if not positions:
             return
@@ -254,13 +258,18 @@ class KatanaStrategy:
                         return v
                 except ValueError:
                     pass
-        # Cache was empty — request fresh data directly from IB
+        # Cache empty — re-subscribe and wait
         try:
-            for item in self.ib.reqAccountSummary():
-                if item.tag == "NetLiquidation" and item.currency == "USD":
-                    return float(item.value)
+            self.ib.reqAccountUpdates(True)
+            self.ib.sleep(2)
+            for av in self.ib.accountValues():
+                if av.tag == "NetLiquidation" and av.currency == "USD":
+                    try:
+                        return float(av.value)
+                    except ValueError:
+                        pass
         except Exception as e:
-            log.warning(f"reqAccountSummary failed: {e}")
+            log.warning(f"Account update failed: {e}")
         return 0.0
 
     def _positions(self) -> Dict[str, float]:
