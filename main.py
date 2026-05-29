@@ -29,15 +29,31 @@ from ib_insync import IB, Stock, MarketOrder, util
 import config
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
+class _ConsoleFilter(logging.Filter):
+    """Keep console clean — suppress verbose progress lines (still written to file)."""
+    def filter(self, record):
+        if record.levelno >= logging.WARNING:
+            return True
+        if record.name.startswith('ib_insync'):
+            return False
+        msg = record.getMessage()
+        # Suppress per-ticker history fetch lines: "  [i/n] SYM: 252 bars"
+        if msg.startswith('  [') and ('bars' in msg or 'no data' in msg):
+            return False
+        return True
+
+_fmt = logging.Formatter(
+    "%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("katana1.log", encoding="utf-8"),
-    ],
 )
+_console = logging.StreamHandler(sys.stdout)
+_console.setFormatter(_fmt)
+_console.addFilter(_ConsoleFilter())
+
+_file = logging.FileHandler("katana1.log", encoding="utf-8")
+_file.setFormatter(_fmt)
+
+logging.basicConfig(level=logging.INFO, handlers=[_console, _file])
 log = logging.getLogger(__name__)
 
 ET = pytz.timezone("America/New_York")
@@ -121,6 +137,7 @@ class KatanaStrategy:
         self._stop_checked_today  = False
         self._daily_checked_today = False
         self._last_event_date: Optional[date]     = None
+        self._last_pnl_time:   Optional[datetime] = None
         # IB historical data caches (populated by _fetch_universe_history)
         self._close_cache:  pd.DataFrame = pd.DataFrame()
         self._volume_cache: pd.DataFrame = pd.DataFrame()
@@ -658,7 +675,7 @@ class KatanaStrategy:
         for t in final_selected:
             self._pending_realloc.pop(t, None)
 
-        # Monthly status log
+        # Monthly status log (file only)
         if self._last_log_date is None or today.month != self._last_log_date.month:
             self._last_log_date = today
             pv_now    = self._portfolio_value()
@@ -672,6 +689,51 @@ class KatanaStrategy:
                 f"Threshold: {threshold:.4f} | Top3: {top3_str} | "
                 f"Cooldowns: {cooldowns} | Next rebal: {self._next_rebal_date}"
             )
+
+        self._display_holdings(weights, prices_all, pv, bullish)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # DISPLAY
+    # ════════════════════════════════════════════════════════════════════════
+    def _display_holdings(self, weights: dict, prices: dict, pv: float, bullish: bool):
+        regime = "BULL" if bullish else "BEAR  (50% cash)"
+        W = 62
+        print("\n" + "═" * W)
+        print(f"  PORTFOLIO   ${pv:>13,.0f}   Regime: {regime}")
+        print("─" * W)
+        print(f"  {'TICKER':<8}  {'WEIGHT':>7}  {'SHARES':>8}  {'PRICE':>10}  {'VALUE':>11}")
+        print("─" * W)
+        for ticker, wt in sorted(weights.items(), key=lambda x: x[1], reverse=True):
+            price  = prices.get(ticker, 0.0)
+            shares = int(wt * pv / price) if price > 0 else 0
+            value  = shares * price
+            print(f"  {ticker:<8}  {wt:>6.1%}  {shares:>8,}  {price:>10.2f}  {value:>11,.0f}")
+        print("─" * W)
+        rebal_str = (f"{self._next_rebal_date}  10:00 AM ET"
+                     if self._next_rebal_date else "—")
+        print(f"  Next rebalance : {rebal_str}")
+        print(f"  P&L refresh    : every 10 min")
+        print("═" * W + "\n")
+
+    def _display_pnl(self):
+        items = {p.contract.symbol: p
+                 for p in self.ib.portfolio()
+                 if p.contract.symbol in self._current_holdings}
+        if not items:
+            return
+        total_mv   = sum(p.marketValue    for p in items.values())
+        total_upnl = sum(p.unrealizedPNL  for p in items.values())
+        now_str    = self._now_et().strftime("%H:%M ET")
+        rebal_str  = (f"{self._next_rebal_date}  10:00 AM ET"
+                      if self._next_rebal_date else "—")
+        print(f"  ── P&L  {now_str}  │  Invested: ${total_mv:>12,.0f}  │  "
+              f"Unrealised: ${total_upnl:>+10,.0f}")
+        for sym, p in sorted(items.items(), key=lambda x: x[1].marketValue, reverse=True):
+            cost = p.marketValue - p.unrealizedPNL
+            pct  = p.unrealizedPNL / cost * 100 if cost else 0.0
+            print(f"       {sym:<8}  ${p.marketValue:>10,.0f}   "
+                  f"{p.unrealizedPNL:>+10,.0f}   ({pct:>+.1f}%)")
+        print(f"     Next rebalance: {rebal_str}\n")
 
     # ════════════════════════════════════════════════════════════════════════
     # HELPERS  (identical logic to the QuantConnect version)
@@ -828,6 +890,17 @@ class KatanaStrategy:
                     log.error(f"Daily check error: {e}", exc_info=True)
                 finally:
                     self._daily_checked_today = True
+
+            # ── P&L display every 10 minutes on weekdays ──────────────────
+            if self._current_holdings and (
+                self._last_pnl_time is None
+                or (now - self._last_pnl_time).total_seconds() >= 600
+            ):
+                try:
+                    self._display_pnl()
+                except Exception:
+                    pass
+                self._last_pnl_time = now
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
