@@ -58,36 +58,25 @@ MIN_VOLUME = 1_000_000      # minimum average daily dollar volume ($)
 # ══════════════════════════════════════════════════════════════════════════════
 
 AI_SOFTWARE = [
-    "MSFT", "GOOGL", "META", "IBM", "CRM", "PLTR", "AI", "BBAI",
-    "SOUN", "AMBA", "PATH", "GTLB", "MDB", "SNOW", "DDOG",
-    "NET", "HUBS", "ZS",
+    "MSFT", "GOOGL", 
 ]
 
-""" CHIPS = [
-    "NVDA", "AMD", "INTC", "AVGO", "QCOM", "TXN", "AMAT", "LRCX",
-    "KLAC", "ASML", "TSM", "MU", "MRVL", "NXPI", "SWKS", "QRVO",
-    "MPWR", "ENTG", "MKSI", "CRUS", "ACLS", "ONTO", "UCTT", "AMKR",
-    "GFS", "NVMI", "AXTI", "IPGP", "COHR", "VIAV", "MTSI", "ALAB",
-    "AAOI", "CAMT", "FN", "LITE",
+CHIPS = [
+    "NVDA", "AMD", 
 ]
 
 NEOCLOUD = [
-    "APLD", "CORZ", "CLSK", "HUT", "MARA", "RIOT", "BTBT", "CIFR",
-    "WULF", "IREN", "VRT", "SMCI", "NTAP", "STX", "WDC",
+    "APLD", "CORZ", 
 ]
 
 HYPERSCALERS = [
-    "AMZN", "GOOG", "MSFT", "META", "ORCL", "IBM", "CSCO", "ANET",
-    "CALX", "NTAP", "GLW", "APH", "BDC", "FLEX",
+    "AMZN", "GOOG", 
 ]
 
 ROBOTICS = [
-    "ISRG", "ROK", "EMR", "HON", "ETN", "DOV", "HUBB",
-    "TT", "GEV", "CAT", "MOD", "GNRC", "NVT", "FIX", "IESC",
-    "EME", "PWR", "J", "TER", "ONTO",
+    "ISRG", "ROK",
 ]
 
 SPACE_ENERGY = [
-    "RKLB", "SPCE", "ASTS", "MNTS", "RDW", "PL", "BKSY",
-    "NEE", "DUK", "SO", "PCG", "AES", "OKLO", "SMR", "LEU",
-] """
+    "RKLB", "SPCE", 
+]
