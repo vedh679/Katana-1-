@@ -299,21 +299,34 @@ class KatanaStrategy:
         return {p.contract.symbol: float(p.position) for p in self.ib.positions()}
 
     def _snapshot_prices(self, tickers: List[str]) -> Dict[str, float]:
-        """One-shot IB snapshot of last/close price for each ticker."""
-        contracts = [self.contracts[t] for t in tickers if t in self.contracts]
-        if not contracts:
-            return {}
-        try:
-            tdata = self.ib.reqTickers(*contracts)
-        except Exception as e:
-            log.warning(f"Snapshot price request failed: {e}")
-            return {}
+        """
+        Get current prices for tickers.
+        Uses ib.portfolio() first (no new market data subscription needed),
+        then falls back to reqTickers only for tickers not already held.
+        This avoids error 10197 (competing live session) for held positions.
+        """
         prices: Dict[str, float] = {}
-        for td in tdata:
-            sym = td.contract.symbol
-            p   = td.last if (td.last and td.last > 0) else td.close
-            if p and p > 0:
-                prices[sym] = float(p)
+
+        # Portfolio prices — already streaming, no new subscription required
+        for item in self.ib.portfolio():
+            sym = item.contract.symbol
+            if sym in tickers and item.marketPrice and item.marketPrice > 0:
+                prices[sym] = float(item.marketPrice)
+
+        # reqTickers only for tickers not covered by portfolio
+        need = [t for t in tickers if t not in prices]
+        if need:
+            contracts = [self.contracts[t] for t in need if t in self.contracts]
+            if contracts:
+                try:
+                    for td in self.ib.reqTickers(*contracts):
+                        sym = td.contract.symbol
+                        p   = td.last if (td.last and td.last > 0) else td.close
+                        if p and p > 0:
+                            prices[sym] = float(p)
+                except Exception as e:
+                    log.warning(f"reqTickers failed: {e}")
+
         return prices
 
     def _single_price(self, ticker: str) -> float:
