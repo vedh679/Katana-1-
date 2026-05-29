@@ -313,7 +313,7 @@ class KatanaStrategy:
 
         action = "BUY" if delta > 0 else "SELL"
         try:
-            self.ib.placeOrder(self.contracts[ticker], MarketOrder(action, abs(delta)))
+            self.ib.placeOrder(self.contracts[ticker], MarketOrder(action, abs(delta), tif='GTC'))
             self.ib.sleep(0.1)
             log.info(
                 f"ORDER  {action} {abs(delta):>6} {ticker:<6}  "
@@ -331,7 +331,7 @@ class KatanaStrategy:
         if qty == 0 or ticker not in self.contracts:
             return False
         try:
-            self.ib.placeOrder(self.contracts[ticker], MarketOrder("SELL", abs(qty)))
+            self.ib.placeOrder(self.contracts[ticker], MarketOrder("SELL", abs(qty), tif='GTC'))
             self.ib.sleep(0.1)
             log.info(f"LIQUIDATE  SELL {abs(qty)} {ticker}")
             return True
