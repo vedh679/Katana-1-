@@ -248,7 +248,7 @@ class KatanaStrategy:
     def _portfolio_value(self) -> float:
         # Retry up to 10 s — account data stream may still be arriving
         for attempt in range(10):
-            for currency in ("USD", "BASE"):
+            for currency in ("USD", "BASE", "GBP"):
                 for av in self.ib.accountValues():
                     if av.tag == "NetLiquidation" and av.currency == currency:
                         try:
