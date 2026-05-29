@@ -63,7 +63,7 @@ AI_SOFTWARE = [
     "NET", "HUBS", "ZS",
 ]
 
-CHIPS = [
+""" CHIPS = [
     "NVDA", "AMD", "INTC", "AVGO", "QCOM", "TXN", "AMAT", "LRCX",
     "KLAC", "ASML", "TSM", "MU", "MRVL", "NXPI", "SWKS", "QRVO",
     "MPWR", "ENTG", "MKSI", "CRUS", "ACLS", "ONTO", "UCTT", "AMKR",
@@ -90,4 +90,4 @@ ROBOTICS = [
 SPACE_ENERGY = [
     "RKLB", "SPCE", "ASTS", "MNTS", "RDW", "PL", "BKSY",
     "NEE", "DUK", "SO", "PCG", "AES", "OKLO", "SMR", "LEU",
-]
+] """
