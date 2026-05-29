@@ -229,10 +229,6 @@ class KatanaStrategy:
         the strategy is aware of trades placed in a previous run.
         Peak prices are set to current price (conservative: no immediate stop).
         """
-        # Subscribe to account updates and wait for the cache to populate
-        self.ib.reqAccountUpdates(True)
-        self.ib.sleep(2)
-
         positions = self._positions()
         if not positions:
             return
@@ -250,26 +246,22 @@ class KatanaStrategy:
     # PORTFOLIO / PRICE HELPERS
     # ════════════════════════════════════════════════════════════════════════
     def _portfolio_value(self) -> float:
-        for av in self.ib.accountValues():
-            if av.tag == "NetLiquidation" and av.currency == "USD":
-                try:
-                    v = float(av.value)
-                    if v > 0:
-                        return v
-                except ValueError:
-                    pass
-        # Cache empty — re-subscribe and wait
-        try:
-            self.ib.reqAccountUpdates(True)
-            self.ib.sleep(2)
+        # Try USD first, then BASE (paper accounts sometimes use BASE currency)
+        for currency in ("USD", "BASE"):
             for av in self.ib.accountValues():
-                if av.tag == "NetLiquidation" and av.currency == "USD":
+                if av.tag == "NetLiquidation" and av.currency == currency:
                     try:
-                        return float(av.value)
+                        v = float(av.value)
+                        if v > 0:
+                            return v
                     except ValueError:
                         pass
-        except Exception as e:
-            log.warning(f"Account update failed: {e}")
+        # Still empty — log what's available for diagnosis
+        available = [(av.tag, av.currency, av.value) for av in self.ib.accountValues()]
+        if available:
+            log.warning(f"NetLiquidation not found. Sample tags: {available[:5]}")
+        else:
+            log.warning("accountValues() cache is empty — IB account data not yet received.")
         return 0.0
 
     def _positions(self) -> Dict[str, float]:
