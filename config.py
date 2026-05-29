@@ -7,7 +7,7 @@
 # ── Interactive Brokers Gateway ───────────────────────────────────────────────
 IB_HOST         = "127.0.0.1"
 IB_PORT         = 4002      # 4001 = live account  |  4002 = paper account
-IB_CLIENT_ID    = 1         # must be unique if multiple scripts run at once
+IB_CLIENT_ID    = 2         # must be unique if multiple scripts run at once
 RECONNECT_DELAY = 30        # seconds to wait between reconnection attempts
 
 
@@ -78,7 +78,7 @@ NEOCLOUD = [
 
 HYPERSCALERS = [
     "AMZN", "GOOG", "MSFT", "META", "ORCL", "IBM", "CSCO", "ANET",
-    "JNPR", "CALX", "NTAP", "GLW", "APH", "BDC", "FLEX",
+    "CALX", "NTAP", "GLW", "APH", "BDC", "FLEX",
 ]
 
 ROBOTICS = [
@@ -89,5 +89,5 @@ ROBOTICS = [
 
 SPACE_ENERGY = [
     "RKLB", "SPCE", "ASTS", "MNTS", "ASTR", "RDW", "PL", "BKSY",
-    "VORB", "NEE", "DUK", "SO", "PCG", "AES", "OKLO", "SMR", "LEU",
+    "NEE", "DUK", "SO", "PCG", "AES", "OKLO", "SMR", "LEU",
 ]

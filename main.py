@@ -218,7 +218,7 @@ class KatanaStrategy:
 
         if qualified:
             self.contracts.update(qualified)
-            self.all_tickers = [t for t in self.all_tickers if t in self.contracts]
+            self.all_tickers = [t for t in self.all_tickers if t in qualified]
             log.info(f"{len(qualified)} contracts qualified. Universe: {len(self.all_tickers)} tickers.")
         else:
             log.error("No contracts qualified — verify IB Gateway is running.")
@@ -249,9 +249,18 @@ class KatanaStrategy:
         for av in self.ib.accountValues():
             if av.tag == "NetLiquidation" and av.currency == "USD":
                 try:
-                    return float(av.value)
+                    v = float(av.value)
+                    if v > 0:
+                        return v
                 except ValueError:
                     pass
+        # Cache was empty — request fresh data directly from IB
+        try:
+            for item in self.ib.reqAccountSummary():
+                if item.tag == "NetLiquidation" and item.currency == "USD":
+                    return float(item.value)
+        except Exception as e:
+            log.warning(f"reqAccountSummary failed: {e}")
         return 0.0
 
     def _positions(self) -> Dict[str, float]:
