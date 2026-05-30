@@ -15,6 +15,7 @@ Stop: Ctrl+C
 """
 
 import atexit
+import json
 import logging
 import math
 import sys
@@ -133,8 +134,9 @@ class KatanaStrategy:
         self._cooldown_until:   Dict[str, date]  = {}
         self._pending_realloc:  Dict[str, date]  = {}
         self._current_holdings: Set[str]          = set()
-        self._next_rebal_date:  Optional[date]    = None
-        self._last_log_date:    Optional[date]    = None
+        self._next_rebal_date:   Optional[date]    = None
+        self._last_rebalanced:   Optional[date]    = None
+        self._last_log_date:     Optional[date]    = None
         self._stop_checked_today  = False
         self._daily_checked_today = False
         self._last_event_date: Optional[date]     = None
@@ -202,6 +204,8 @@ class KatanaStrategy:
                 log.info("Connected to IB Gateway.")
                 self._qualify_contracts()
                 self._sync_state_from_ib()
+                self._load_state()
+                self._display_startup()
                 return
             except Exception as e:
                 log.warning(f"Connection failed: {e}  — retrying in {self.RECONNECT_DELAY}s")
@@ -530,9 +534,9 @@ class KatanaStrategy:
     # 2. DAILY CHECK  (daily, 10:00 AM ET)
     # ════════════════════════════════════════════════════════════════════════
     def _daily_check(self):
-        log.info("── Daily check ──────────────────────────────────────")
         today = self._today_et()
 
+        # Update peak prices for trailing stop tracking
         if self._current_holdings:
             prices    = self._snapshot_prices(list(self._current_holdings))
             positions = self._positions()
@@ -544,10 +548,19 @@ class KatanaStrategy:
                             self._peak_prices.get(ticker, p), p
                         )
 
+        # Rebalance decision
         if self._next_rebal_date is None or today >= self._next_rebal_date:
+            log.info(f"── Rebalance day ({today}) ───────────────────────────")
             self._rebalance()
             self._next_rebal_date = today + timedelta(days=self.REBALANCE_EVERY_DAYS)
+            self._last_rebalanced = today
+            self._save_state()
         else:
+            days_left = (self._next_rebal_date - today).days
+            log.info(
+                f"── No rebalance today — next: {self._next_rebal_date} "
+                f"({days_left} day{'s' if days_left != 1 else ''} away)"
+            )
             self._process_pending_reallocations(today)
 
     # ════════════════════════════════════════════════════════════════════════
@@ -722,8 +735,77 @@ class KatanaStrategy:
         self._display_holdings(weights, prices_all, pv, bullish)
 
     # ════════════════════════════════════════════════════════════════════════
+    # STATE PERSISTENCE
+    # ════════════════════════════════════════════════════════════════════════
+    _STATE_FILE = "katana_state.json"
+
+    def _save_state(self):
+        state = {
+            "last_rebalanced": str(self._last_rebalanced) if self._last_rebalanced else None,
+            "next_rebalance":  str(self._next_rebal_date)  if self._next_rebal_date  else None,
+        }
+        try:
+            with open(self._STATE_FILE, "w") as f:
+                json.dump(state, f, indent=2)
+            log.info(f"State saved — last: {self._last_rebalanced}, next: {self._next_rebal_date}")
+        except Exception as e:
+            log.warning(f"Could not save state: {e}")
+
+    def _load_state(self):
+        try:
+            with open(self._STATE_FILE) as f:
+                state = json.load(f)
+            if state.get("last_rebalanced"):
+                self._last_rebalanced = date.fromisoformat(state["last_rebalanced"])
+            if state.get("next_rebalance"):
+                self._next_rebal_date = date.fromisoformat(state["next_rebalance"])
+            log.info(
+                f"State loaded — last rebalanced: {self._last_rebalanced}, "
+                f"next rebalance: {self._next_rebal_date}"
+            )
+        except FileNotFoundError:
+            log.info("No state file — rebalance will run at next 10:00 AM ET.")
+        except Exception as e:
+            log.warning(f"Could not load state: {e}")
+
+    # ════════════════════════════════════════════════════════════════════════
     # DISPLAY
     # ════════════════════════════════════════════════════════════════════════
+    def _display_startup(self):
+        """Show current portfolio state immediately after connecting."""
+        pv    = self._portfolio_value()
+        items = {p.contract.symbol: p for p in self.ib.portfolio()
+                 if p.contract.symbol in self._current_holdings}
+        W     = 64
+        mode  = "PAPER" if self.IB_PORT == 4002 else "LIVE"
+        label = f"{len(items)} holding{'s' if len(items) != 1 else ''}" if items else "all cash"
+
+        print("\n" + "═" * W)
+        print(f"  KATANA-1  │  {mode}  │  ${pv:>12,.0f}  │  {label}")
+
+        if items:
+            total_upnl = sum(p.unrealizedPNL for p in items.values())
+            print("─" * W)
+            print(f"  {'TICKER':<8} {'SHARES':>8} {'PRICE':>10} {'VALUE':>12} {'P&L':>10}")
+            print("─" * W)
+            for sym, p in sorted(items.items(), key=lambda x: x[1].marketValue, reverse=True):
+                print(f"  {sym:<8} {int(p.position):>8,} {p.marketPrice:>10.2f} "
+                      f"{p.marketValue:>12,.0f} {p.unrealizedPNL:>+10,.0f}")
+            print("─" * W)
+            print(f"  {'Total unrealised P&L':<40} {total_upnl:>+10,.0f}")
+
+        today = self._today_et()
+        print("─" * W)
+        print(f"  Last rebalanced : {self._last_rebalanced or 'Never'}")
+        if self._next_rebal_date:
+            days = (self._next_rebal_date - today).days
+            when = "TODAY" if days == 0 else f"in {days} day{'s' if days != 1 else ''}"
+            print(f"  Next rebalance  : {self._next_rebal_date}  ({when})  10:00 AM ET")
+        else:
+            print(f"  Next rebalance  : today at 10:00 AM ET  (first run)")
+        print(f"  P&L refresh     : every 10 min")
+        print("═" * W + "\n")
+
     def _display_holdings(self, weights: dict, prices: dict, pv: float, bullish: bool):
         regime = "BULL" if bullish else "BEAR  (50% cash)"
         W = 62
