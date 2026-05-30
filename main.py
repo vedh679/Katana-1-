@@ -808,6 +808,19 @@ class KatanaStrategy:
     # ════════════════════════════════════════════════════════════════════════
     # DISPLAY
     # ════════════════════════════════════════════════════════════════════════
+    def _rebal_display_str(self, today: date) -> str:
+        """Return a human-readable next-rebalance string, skipping weekends."""
+        d = self._next_rebal_date
+        first_run = d is None
+        if d is None:
+            d = today
+        while d.weekday() >= 5:   # Saturday=5, Sunday=6 → advance to Monday
+            d += timedelta(days=1)
+        days = (d - today).days
+        when = "TODAY" if days == 0 else f"in {days} day{'s' if days != 1 else ''}"
+        suffix = "  (first run)" if first_run else ""
+        return f"{d}  ({when})  10:00 AM ET{suffix}"
+
     def _display_startup(self):
         """Show current portfolio state immediately after connecting."""
         pv    = self._portfolio_value()
@@ -834,12 +847,7 @@ class KatanaStrategy:
         today = self._today_et()
         print("─" * W)
         print(f"  Last rebalanced : {self._last_rebalanced or 'Never'}")
-        if self._next_rebal_date:
-            days = (self._next_rebal_date - today).days
-            when = "TODAY" if days == 0 else f"in {days} day{'s' if days != 1 else ''}"
-            print(f"  Next rebalance  : {self._next_rebal_date}  ({when})  10:00 AM ET")
-        else:
-            print(f"  Next rebalance  : today at 10:00 AM ET  (first run)")
+        print(f"  Next rebalance  : {self._rebal_display_str(today)}")
         print(f"  P&L refresh     : every 10 min")
         print("═" * W + "\n")
 
@@ -857,9 +865,7 @@ class KatanaStrategy:
             value  = shares * price
             print(f"  {ticker:<8}  {wt:>6.1%}  {shares:>8,}  {price:>10.2f}  {value:>11,.0f}")
         print("─" * W)
-        rebal_str = (f"{self._next_rebal_date}  10:00 AM ET"
-                     if self._next_rebal_date else "—")
-        print(f"  Next rebalance : {rebal_str}")
+        print(f"  Next rebalance : {self._rebal_display_str(self._today_et())}")
         print(f"  P&L refresh    : every 10 min")
         print("═" * W + "\n")
 
@@ -873,9 +879,10 @@ class KatanaStrategy:
             return   # no live prices — market closed or data unavailable
         total_mv   = sum(p.marketValue    for p in items.values())
         total_upnl = sum(p.unrealizedPNL  for p in items.values())
-        now_str    = self._now_et().strftime("%H:%M ET")
-        rebal_str  = (f"{self._next_rebal_date}  10:00 AM ET"
-                      if self._next_rebal_date else "—")
+        now     = self._now_et()
+        today   = now.date()
+        now_str = now.strftime("%H:%M ET")
+        rebal_str = self._rebal_display_str(today)
         print(f"  ── P&L  {now_str}  │  Invested: ${total_mv:>12,.0f}  │  "
               f"Unrealised: ${total_upnl:>+10,.0f}")
         for sym, p in sorted(items.items(), key=lambda x: x[1].marketValue, reverse=True):
