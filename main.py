@@ -550,10 +550,10 @@ class KatanaStrategy:
 
         # Rebalance decision
         if self._next_rebal_date is None or today >= self._next_rebal_date:
-            log.info(f"── Rebalance day ({today}) ───────────────────────────")
-            self._rebalance()
             self._next_rebal_date = today + timedelta(days=self.REBALANCE_EVERY_DAYS)
             self._last_rebalanced = today
+            log.info(f"── Rebalance day ({today}) ───────────────────────────")
+            self._rebalance()
             self._save_state()
         else:
             days_left = (self._next_rebal_date - today).days
@@ -743,6 +743,8 @@ class KatanaStrategy:
         state = {
             "last_rebalanced": str(self._last_rebalanced) if self._last_rebalanced else None,
             "next_rebalance":  str(self._next_rebal_date)  if self._next_rebal_date  else None,
+            "cooldown_until":  {t: str(d) for t, d in self._cooldown_until.items()},
+            "pending_realloc": {t: str(d) for t, d in self._pending_realloc.items()},
         }
         try:
             with open(self._STATE_FILE, "w") as f:
@@ -760,9 +762,19 @@ class KatanaStrategy:
                 self._last_rebalanced = date.fromisoformat(state["last_rebalanced"])
             if state.get("next_rebalance"):
                 self._next_rebal_date = date.fromisoformat(state["next_rebalance"])
+            if state.get("cooldown_until"):
+                self._cooldown_until = {
+                    t: date.fromisoformat(d) for t, d in state["cooldown_until"].items()
+                }
+            if state.get("pending_realloc"):
+                self._pending_realloc = {
+                    t: date.fromisoformat(d) for t, d in state["pending_realloc"].items()
+                }
             log.info(
                 f"State loaded — last rebalanced: {self._last_rebalanced}, "
                 f"next rebalance: {self._next_rebal_date}"
+                + (f", cooldowns: {list(self._cooldown_until.keys())}" if self._cooldown_until else "")
+                + (f", pending realloc: {list(self._pending_realloc.keys())}" if self._pending_realloc else "")
             )
             return
         except FileNotFoundError:

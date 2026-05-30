@@ -15,7 +15,10 @@
       "Bash(git config *)",
       "Bash(git push *)",
       "Bash(git rm *)",
-      "Bash(Get-Content *)"
+      "Bash(Get-Content *)",
+      "Bash(git checkout *)",
+      "Bash(git merge *)",
+      "Bash(git branch *)"
     ]
   }
 }
