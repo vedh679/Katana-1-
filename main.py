@@ -752,6 +752,7 @@ class KatanaStrategy:
             log.warning(f"Could not save state: {e}")
 
     def _load_state(self):
+        # 1. Try persisted state file
         try:
             with open(self._STATE_FILE) as f:
                 state = json.load(f)
@@ -763,10 +764,34 @@ class KatanaStrategy:
                 f"State loaded — last rebalanced: {self._last_rebalanced}, "
                 f"next rebalance: {self._next_rebal_date}"
             )
+            return
         except FileNotFoundError:
-            log.info("No state file — rebalance will run at next 10:00 AM ET.")
+            pass
         except Exception as e:
             log.warning(f"Could not load state: {e}")
+
+        # 2. No state file — infer last rebalance from IB execution history
+        if self._current_holdings:
+            try:
+                fills = self.ib.reqExecutions()
+                if fills:
+                    latest_dt = max(f.time for f in fills)
+                    # Convert to ET date
+                    if latest_dt.tzinfo is None:
+                        latest_dt = pytz.utc.localize(latest_dt)
+                    last_date = latest_dt.astimezone(ET).date()
+                    self._last_rebalanced = last_date
+                    self._next_rebal_date = last_date + timedelta(days=self.REBALANCE_EVERY_DAYS)
+                    log.info(
+                        f"State inferred from executions — last: {self._last_rebalanced}, "
+                        f"next: {self._next_rebal_date}"
+                    )
+                    self._save_state()
+                    return
+            except Exception as e:
+                log.warning(f"Could not infer state from executions: {e}")
+
+        log.info("No prior state found — rebalance will run at next 10:00 AM ET.")
 
     # ════════════════════════════════════════════════════════════════════════
     # DISPLAY
