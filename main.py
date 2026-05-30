@@ -869,6 +869,8 @@ class KatanaStrategy:
                  if p.contract.symbol in self._current_holdings}
         if not items:
             return
+        if not any(p.marketPrice and p.marketPrice > 0 for p in items.values()):
+            return   # no live prices — market closed or data unavailable
         total_mv   = sum(p.marketValue    for p in items.values())
         total_upnl = sum(p.unrealizedPNL  for p in items.values())
         now_str    = self._now_et().strftime("%H:%M ET")
@@ -1014,6 +1016,17 @@ class KatanaStrategy:
                 self._daily_checked_today = False
                 self._last_event_date     = today
 
+            # ── P&L display every 10 minutes ──────────────────────────────
+            if self._current_holdings and (
+                self._last_pnl_time is None
+                or (now - self._last_pnl_time).total_seconds() >= 600
+            ):
+                try:
+                    self._display_pnl()
+                except Exception:
+                    pass
+                self._last_pnl_time = now
+
             if not self._is_weekday(today):
                 continue
 
@@ -1038,17 +1051,6 @@ class KatanaStrategy:
                     log.error(f"Daily check error: {e}", exc_info=True)
                 finally:
                     self._daily_checked_today = True
-
-            # ── P&L display every 10 minutes on weekdays ──────────────────
-            if self._current_holdings and (
-                self._last_pnl_time is None
-                or (now - self._last_pnl_time).total_seconds() >= 600
-            ):
-                try:
-                    self._display_pnl()
-                except Exception:
-                    pass
-                self._last_pnl_time = now
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
