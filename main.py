@@ -141,6 +141,7 @@ class KatanaStrategy:
         self._daily_checked_today = False
         self._last_event_date: Optional[date]     = None
         self._last_pnl_time:   Optional[datetime] = None
+        self._start_value:     float              = 0.0
         # IB historical data caches (populated by _fetch_universe_history)
         self._close_cache:  pd.DataFrame = pd.DataFrame()
         self._volume_cache: pd.DataFrame = pd.DataFrame()
@@ -745,6 +746,7 @@ class KatanaStrategy:
             "next_rebalance":  str(self._next_rebal_date)  if self._next_rebal_date  else None,
             "cooldown_until":  {t: str(d) for t, d in self._cooldown_until.items()},
             "pending_realloc": {t: str(d) for t, d in self._pending_realloc.items()},
+            "start_value":     self._start_value if self._start_value > 0 else None,
         }
         try:
             with open(self._STATE_FILE, "w") as f:
@@ -770,6 +772,8 @@ class KatanaStrategy:
                 self._pending_realloc = {
                     t: date.fromisoformat(d) for t, d in state["pending_realloc"].items()
                 }
+            if state.get("start_value"):
+                self._start_value = float(state["start_value"])
             log.info(
                 f"State loaded — last rebalanced: {self._last_rebalanced}, "
                 f"next rebalance: {self._next_rebal_date}"
@@ -823,7 +827,10 @@ class KatanaStrategy:
 
     def _display_startup(self):
         """Show current portfolio state immediately after connecting."""
-        pv    = self._portfolio_value()
+        pv = self._portfolio_value()
+        if pv > 0 and self._start_value == 0.0:
+            self._start_value = pv
+            self._save_state()
         items = {p.contract.symbol: p for p in self.ib.portfolio()
                  if p.contract.symbol in self._current_holdings}
         W     = 64
@@ -869,6 +876,69 @@ class KatanaStrategy:
         print(f"  P&L refresh    : every 10 min")
         print("═" * W + "\n")
 
+    def _portfolio_metrics(self, items: dict, positions: dict):
+        """
+        Compute portfolio-level metrics from the close cache.
+        Returns (sharpe, beta, today_pct) — any value is None when insufficient data.
+        Sharpe and Beta use the same LOOKBACK window as the momentum signal.
+        Today % compares current market values to yesterday's closing prices.
+        """
+        sharpe = beta = today_pct = None
+        if self._close_cache.empty:
+            return sharpe, beta, today_pct
+
+        total_mv = sum(p.marketValue for p in items.values() if p.marketValue > 0)
+        if total_mv <= 0:
+            return sharpe, beta, today_pct
+
+        held = [s for s in items if s in self._close_cache.columns and items[s].marketValue > 0]
+        if not held:
+            return sharpe, beta, today_pct
+
+        weights = {s: items[s].marketValue / total_mv for s in held}
+
+        # ── Today % — current MV vs previous close × qty ──────────────
+        try:
+            day_start = 0.0
+            for sym in held:
+                qty = abs(float(positions.get(sym, 0)))
+                if qty > 0:
+                    prev_close = float(self._close_cache[sym].dropna().iloc[-1])
+                    day_start += qty * prev_close
+            if day_start > 0:
+                today_pct = (total_mv - day_start) / day_start * 100
+        except Exception:
+            pass
+
+        # ── Sharpe & Beta — weighted portfolio daily returns ───────────
+        try:
+            skip  = self.SKIP if self.SKIP > 0 else 0
+            close = self._close_cache[held].dropna()
+            if skip:
+                close = close.iloc[:-skip]
+            close = close.iloc[-self.LOOKBACK:]
+            rets  = close.pct_change().dropna()
+            if len(rets) >= 20:
+                port_rets = sum(rets[s] * weights[s] for s in held if s in rets.columns)
+                std = float(port_rets.std())
+                if std > 0:
+                    sharpe = float(port_rets.mean()) / std * np.sqrt(252)
+                if "SPY" in self._close_cache.columns:
+                    spy_close = self._close_cache["SPY"].dropna()
+                    if skip:
+                        spy_close = spy_close.iloc[:-skip]
+                    spy_rets = spy_close.iloc[-self.LOOKBACK:].pct_change().dropna()
+                    aligned  = pd.concat([port_rets, spy_rets], axis=1).dropna()
+                    if len(aligned) >= 20:
+                        aligned.columns = ["port", "spy"]
+                        spy_var = float(aligned["spy"].var())
+                        if spy_var > 0:
+                            beta = float(aligned["port"].cov(aligned["spy"])) / spy_var
+        except Exception:
+            pass
+
+        return sharpe, beta, today_pct
+
     def _display_pnl(self):
         items = {p.contract.symbol: p
                  for p in self.ib.portfolio()
@@ -877,20 +947,45 @@ class KatanaStrategy:
             return
         if not any(p.marketPrice and p.marketPrice > 0 for p in items.values()):
             return   # no live prices — market closed or data unavailable
-        total_mv   = sum(p.marketValue    for p in items.values())
-        total_upnl = sum(p.unrealizedPNL  for p in items.values())
-        now     = self._now_et()
-        today   = now.date()
-        now_str = now.strftime("%H:%M ET")
-        rebal_str = self._rebal_display_str(today)
-        print(f"  ── P&L  {now_str}  │  Invested: ${total_mv:>12,.0f}  │  "
-              f"Unrealised: ${total_upnl:>+10,.0f}")
+
+        positions  = self._positions()
+        total_mv   = sum(p.marketValue   for p in items.values())
+        total_upnl = sum(p.unrealizedPNL for p in items.values())
+        total_rpnl = sum(p.realizedPNL   for p in items.values())
+        pv         = self._portfolio_value()
+        now        = self._now_et()
+        today      = now.date()
+        now_str    = now.strftime("%H:%M ET")
+
+        sharpe, beta, today_pct = self._portfolio_metrics(items, positions)
+
+        since_pct = ((pv - self._start_value) / self._start_value * 100
+                     if self._start_value > 0 and pv > 0 else None)
+
+        W = 66
+        def _fmt_pct(v):
+            return f"{v:>+.2f}%" if v is not None else "  N/A"
+        def _fmt_ratio(v):
+            return f"{v:.2f}" if v is not None else "N/A"
+
+        print(f"\n  ── P&L  {now_str}  {'─' * (W - 14)}")
+        print(f"  {'Portfolio NLV':<20} ${pv:>13,.0f}   "
+              f"{'Invested':<12} ${total_mv:>12,.0f}")
+        print(f"  {'Today':<20} {_fmt_pct(today_pct):>10}   "
+              f"{'Since Start':<12} {_fmt_pct(since_pct):>10}")
+        print(f"  {'Unrealised P&L':<20} ${total_upnl:>+12,.0f}   "
+              f"{'Realised P&L':<12} ${total_rpnl:>+12,.0f}")
+        print(f"  {'Sharpe (ann.)':<20} {_fmt_ratio(sharpe):>10}   "
+              f"{'Beta (SPY)':<12} {_fmt_ratio(beta):>10}")
+        print(f"  {'─' * W}")
+        print(f"  {'TICKER':<8}  {'MKT VALUE':>12}  {'UNREALISED':>12}  {'RETURN':>8}")
+        print(f"  {'─' * W}")
         for sym, p in sorted(items.items(), key=lambda x: x[1].marketValue, reverse=True):
             cost = p.marketValue - p.unrealizedPNL
             pct  = p.unrealizedPNL / cost * 100 if cost else 0.0
-            print(f"       {sym:<8}  ${p.marketValue:>10,.0f}   "
-                  f"{p.unrealizedPNL:>+10,.0f}   ({pct:>+.1f}%)")
-        print(f"     Next rebalance: {rebal_str}\n")
+            print(f"  {sym:<8}  ${p.marketValue:>11,.0f}  ${p.unrealizedPNL:>+11,.0f}  {pct:>+7.1f}%")
+        print(f"  {'─' * W}")
+        print(f"  Next rebalance: {self._rebal_display_str(today)}\n")
 
     # ════════════════════════════════════════════════════════════════════════
     # HELPERS  (identical logic to the QuantConnect version)
