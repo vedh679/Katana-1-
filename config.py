@@ -4,6 +4,10 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+# ── Capital ───────────────────────────────────────────────────────────────────
+INITIAL_CAPITAL = 1_000_000     # starting capital ($) — used for since-inception P&L
+
+
 # ── Interactive Brokers Gateway ───────────────────────────────────────────────
 IB_HOST         = "127.0.0.1"
 IB_PORT         = 4002      # 4001 = live account  |  4002 = paper account

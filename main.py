@@ -110,6 +110,8 @@ class KatanaStrategy:
         # Filters
         self.MIN_PRICE  = config.MIN_PRICE
         self.MIN_VOLUME = config.MIN_VOLUME
+        # Capital
+        self.INITIAL_CAPITAL = config.INITIAL_CAPITAL
 
         log.info(
             f"Config loaded — "
@@ -141,7 +143,6 @@ class KatanaStrategy:
         self._daily_checked_today = False
         self._last_event_date: Optional[date]     = None
         self._last_pnl_time:   Optional[datetime] = None
-        self._start_value:     float              = 0.0
         # IB historical data caches (populated by _fetch_universe_history)
         self._close_cache:  pd.DataFrame = pd.DataFrame()
         self._volume_cache: pd.DataFrame = pd.DataFrame()
@@ -746,7 +747,6 @@ class KatanaStrategy:
             "next_rebalance":  str(self._next_rebal_date)  if self._next_rebal_date  else None,
             "cooldown_until":  {t: str(d) for t, d in self._cooldown_until.items()},
             "pending_realloc": {t: str(d) for t, d in self._pending_realloc.items()},
-            "start_value":     self._start_value if self._start_value > 0 else None,
         }
         try:
             with open(self._STATE_FILE, "w") as f:
@@ -772,8 +772,6 @@ class KatanaStrategy:
                 self._pending_realloc = {
                     t: date.fromisoformat(d) for t, d in state["pending_realloc"].items()
                 }
-            if state.get("start_value"):
-                self._start_value = float(state["start_value"])
             log.info(
                 f"State loaded — last rebalanced: {self._last_rebalanced}, "
                 f"next rebalance: {self._next_rebal_date}"
@@ -828,9 +826,6 @@ class KatanaStrategy:
     def _display_startup(self):
         """Show current portfolio state immediately after connecting."""
         pv = self._portfolio_value()
-        if pv > 0 and self._start_value == 0.0:
-            self._start_value = pv
-            self._save_state()
         items = {p.contract.symbol: p for p in self.ib.portfolio()
                  if p.contract.symbol in self._current_holdings}
         W     = 64
@@ -878,9 +873,11 @@ class KatanaStrategy:
 
     def _portfolio_metrics(self, items: dict, positions: dict):
         """
-        Compute portfolio-level metrics from the close cache.
+        Compute portfolio-level metrics.
         Returns (sharpe, beta, today_pct) — any value is None when insufficient data.
-        Sharpe and Beta use the same LOOKBACK window as the momentum signal.
+
+        Sharpe and Beta use the FULL close-cache history (all executed-trade price
+        data available), weighted by current market values.
         Today % compares current market values to yesterday's closing prices.
         """
         sharpe = beta = today_pct = None
@@ -910,24 +907,17 @@ class KatanaStrategy:
         except Exception:
             pass
 
-        # ── Sharpe & Beta — weighted portfolio daily returns ───────────
+        # ── Sharpe & Beta — full history, weighted portfolio daily returns ─
         try:
-            skip  = self.SKIP if self.SKIP > 0 else 0
-            close = self._close_cache[held].dropna()
-            if skip:
-                close = close.iloc[:-skip]
-            close = close.iloc[-self.LOOKBACK:]
-            rets  = close.pct_change().dropna()
+            rets = (self._close_cache[held].dropna()
+                    .pct_change().dropna())
             if len(rets) >= 20:
                 port_rets = sum(rets[s] * weights[s] for s in held if s in rets.columns)
                 std = float(port_rets.std())
                 if std > 0:
                     sharpe = float(port_rets.mean()) / std * np.sqrt(252)
                 if "SPY" in self._close_cache.columns:
-                    spy_close = self._close_cache["SPY"].dropna()
-                    if skip:
-                        spy_close = spy_close.iloc[:-skip]
-                    spy_rets = spy_close.iloc[-self.LOOKBACK:].pct_change().dropna()
+                    spy_rets = self._close_cache["SPY"].dropna().pct_change().dropna()
                     aligned  = pd.concat([port_rets, spy_rets], axis=1).dropna()
                     if len(aligned) >= 20:
                         aligned.columns = ["port", "spy"]
@@ -951,16 +941,19 @@ class KatanaStrategy:
         positions  = self._positions()
         total_mv   = sum(p.marketValue   for p in items.values())
         total_upnl = sum(p.unrealizedPNL for p in items.values())
-        total_rpnl = sum(p.realizedPNL   for p in items.values())
         pv         = self._portfolio_value()
         now        = self._now_et()
         today      = now.date()
         now_str    = now.strftime("%H:%M ET")
 
+        # Realised P&L = total gain since inception minus what is still unrealised.
+        # Covers closed positions that no longer appear in ib.portfolio().
+        total_rpnl = (pv - self.INITIAL_CAPITAL) - total_upnl if pv > 0 else 0.0
+
         sharpe, beta, today_pct = self._portfolio_metrics(items, positions)
 
-        since_pct = ((pv - self._start_value) / self._start_value * 100
-                     if self._start_value > 0 and pv > 0 else None)
+        since_pct = ((pv - self.INITIAL_CAPITAL) / self.INITIAL_CAPITAL * 100
+                     if pv > 0 else None)
 
         W = 66
         def _fmt_pct(v):
