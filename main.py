@@ -205,8 +205,8 @@ class KatanaStrategy:
                 )
                 log.info("Connected to IB Gateway.")
                 self._qualify_contracts()
+                self._load_state()        # load peaks/cooldowns before sync so sync only fills gaps
                 self._sync_state_from_ib()
-                self._load_state()
                 self._display_startup()
                 return
             except Exception as e:
@@ -264,21 +264,28 @@ class KatanaStrategy:
 
     def _sync_state_from_ib(self):
         """
-        On startup, seed _current_holdings from any existing IB positions so
-        the strategy is aware of trades placed in a previous run.
-        Peak prices are set to current price (conservative: no immediate stop).
+        On startup, seed _current_holdings from any existing IB positions.
+        Peak prices are restored from the state file (loaded before this call).
+        For any position whose peak was not persisted, fall back to current price
+        (conservative — no immediate stop on that position).
         """
         positions = self._positions()
         if not positions:
             return
         log.info(f"Existing IB positions found — syncing {len(positions)} holdings ...")
-        prices = self._snapshot_prices(list(positions.keys()))
+        need_price = [t for t, qty in positions.items()
+                      if qty != 0 and t in self.contracts and t not in self._peak_prices]
+        prices = self._snapshot_prices(need_price) if need_price else {}
         for ticker, qty in positions.items():
             if qty != 0 and ticker in self.contracts:
                 self._current_holdings.add(ticker)
-                p = prices.get(ticker, 0.0)
-                if p > 0:
-                    self._peak_prices[ticker] = p
+                if ticker not in self._peak_prices:
+                    p = prices.get(ticker, 0.0)
+                    if p > 0:
+                        self._peak_prices[ticker] = p
+                        log.info(f"  {ticker}: no persisted peak — set to current ${p:.2f}")
+                else:
+                    log.info(f"  {ticker}: peak restored from state ${self._peak_prices[ticker]:.2f}")
         log.info(f"Synced holdings: {sorted(self._current_holdings)}")
 
     # ════════════════════════════════════════════════════════════════════════
@@ -531,6 +538,8 @@ class KatanaStrategy:
                 f"Cooldown until {self._cooldown_until[ticker]} | "
                 f"Realloc from {self._pending_realloc.get(ticker)}"
             )
+        if to_exit:
+            self._save_state()   # persist cooldowns and removed peaks immediately
 
     # ════════════════════════════════════════════════════════════════════════
     # 2. DAILY CHECK  (daily, 10:00 AM ET)
@@ -549,6 +558,7 @@ class KatanaStrategy:
                         self._peak_prices[ticker] = max(
                             self._peak_prices.get(ticker, p), p
                         )
+            self._save_state()   # persist updated peaks so restarts don't lose them
 
         # Rebalance decision
         if self._next_rebal_date is None or today >= self._next_rebal_date:
@@ -747,6 +757,7 @@ class KatanaStrategy:
             "next_rebalance":  str(self._next_rebal_date)  if self._next_rebal_date  else None,
             "cooldown_until":  {t: str(d) for t, d in self._cooldown_until.items()},
             "pending_realloc": {t: str(d) for t, d in self._pending_realloc.items()},
+            "peak_prices":     dict(self._peak_prices),
         }
         try:
             with open(self._STATE_FILE, "w") as f:
@@ -772,6 +783,8 @@ class KatanaStrategy:
                 self._pending_realloc = {
                     t: date.fromisoformat(d) for t, d in state["pending_realloc"].items()
                 }
+            if state.get("peak_prices"):
+                self._peak_prices = {t: float(p) for t, p in state["peak_prices"].items()}
             log.info(
                 f"State loaded — last rebalanced: {self._last_rebalanced}, "
                 f"next rebalance: {self._next_rebal_date}"
