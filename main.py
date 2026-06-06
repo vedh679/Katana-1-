@@ -256,6 +256,7 @@ class KatanaStrategy:
                 )
                 log.info("Reconnected to IB Gateway.")
                 self._qualify_contracts()
+                self._sync_state_from_ib()   # detect offline fills + verify stops
                 return
             except Exception as e:
                 log.warning(f"Reconnect failed: {e}")
