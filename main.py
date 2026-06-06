@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Set
 import numpy as np
 import pandas as pd
 import pytz
-from ib_insync import IB, Stock, MarketOrder, util
+from ib_insync import IB, Stock, MarketOrder, Order, util
 
 import config
 
@@ -132,17 +132,16 @@ class KatanaStrategy:
         log.info(f"Universe: {len(raw)} unique tickers across 6 sectors.")
 
     def _init_state(self):
-        self._peak_prices:      Dict[str, float] = {}
+        self._stop_order_ids:   Dict[str, int]   = {}  # ticker → IB orderId of GTC trailing stop
         self._cooldown_until:   Dict[str, date]  = {}
         self._pending_realloc:  Dict[str, date]  = {}
         self._current_holdings: Set[str]          = set()
-        self._next_rebal_date:   Optional[date]    = None
-        self._last_rebalanced:   Optional[date]    = None
-        self._last_log_date:     Optional[date]    = None
-        self._stop_checked_today  = False
+        self._next_rebal_date:  Optional[date]    = None
+        self._last_rebalanced:  Optional[date]    = None
+        self._last_log_date:    Optional[date]    = None
         self._daily_checked_today = False
-        self._last_event_date: Optional[date]     = None
-        self._last_pnl_time:   Optional[datetime] = None
+        self._last_event_date:  Optional[date]   = None
+        self._last_pnl_time:    Optional[datetime] = None
         # IB historical data caches (populated by _fetch_universe_history)
         self._close_cache:  pd.DataFrame = pd.DataFrame()
         self._volume_cache: pd.DataFrame = pd.DataFrame()
@@ -150,12 +149,35 @@ class KatanaStrategy:
     def _register_ib_callbacks(self):
         self.ib.disconnectedEvent += self._on_ib_disconnect
         self.ib.errorEvent        += self._on_ib_error
+        self.ib.orderStatusEvent  += self._on_order_status
 
     # ════════════════════════════════════════════════════════════════════════
     # IB CALLBACKS
     # ════════════════════════════════════════════════════════════════════════
     def _on_ib_disconnect(self):
         log.warning("IB Gateway disconnected.")
+
+    def _on_order_status(self, trade):
+        """Detect when a GTC trailing stop fills while the algorithm is running."""
+        if trade.orderStatus.status != 'Filled':
+            return
+        filled_id = trade.order.orderId
+        for ticker, oid in list(self._stop_order_ids.items()):
+            if oid != filled_id:
+                continue
+            today    = self._today_et()
+            fill_px  = trade.orderStatus.avgFillPrice
+            log.warning(
+                f"TRAILING STOP FILLED: {ticker} @ ${fill_px:.2f} | "
+                f"Cooldown until {today + timedelta(days=self.COOLDOWN_DAYS)} | "
+                f"Realloc from {today + timedelta(days=self.REALLOCATION_DELAY_DAYS)}"
+            )
+            self._cooldown_until[ticker]  = today + timedelta(days=self.COOLDOWN_DAYS)
+            self._pending_realloc[ticker] = today + timedelta(days=self.REALLOCATION_DELAY_DAYS)
+            self._current_holdings.discard(ticker)
+            self._stop_order_ids.pop(ticker, None)
+            self._save_state()
+            break
 
     def _on_ib_error(self, reqId, errorCode, errorString, contract):
         if errorCode in {2104, 2106, 2107, 2108, 2158, 2100}:
@@ -264,29 +286,51 @@ class KatanaStrategy:
 
     def _sync_state_from_ib(self):
         """
-        On startup, seed _current_holdings from any existing IB positions.
-        Peak prices are restored from the state file (loaded before this call).
-        For any position whose peak was not persisted, fall back to current price
-        (conservative — no immediate stop on that position).
+        On startup (after _load_state):
+        1. Detect positions that stopped out while the algorithm was offline —
+           ticker was in persisted _current_holdings but IB no longer holds it.
+        2. Verify surviving positions still have active GTC trailing stops on IB;
+           re-place any that are missing (e.g. cancelled externally in TWS).
+        3. Rebuild _current_holdings from actual IB positions.
         """
+        today     = self._today_et()
         positions = self._positions()
+        open_ids  = {t.order.orderId for t in self.ib.openTrades()}
+
+        # ── 1. Offline stop-fill detection ────────────────────────────────
+        for ticker in list(self._current_holdings):
+            if positions.get(ticker, 0) == 0:
+                had_stop = ticker in self._stop_order_ids
+                log.warning(
+                    f"OFFLINE POSITION GONE: {ticker} "
+                    f"{'(trailing stop triggered)' if had_stop else '(closed externally)'} — "
+                    f"applying cooldown until {today + timedelta(days=self.COOLDOWN_DAYS)}"
+                )
+                self._cooldown_until[ticker]  = today + timedelta(days=self.COOLDOWN_DAYS)
+                self._pending_realloc[ticker] = today + timedelta(days=self.REALLOCATION_DELAY_DAYS)
+                self._stop_order_ids.pop(ticker, None)
+
+        # ── 2. Rebuild holdings + verify stops for surviving positions ─────
+        self._current_holdings = set()
         if not positions:
             return
+
         log.info(f"Existing IB positions found — syncing {len(positions)} holdings ...")
-        need_price = [t for t, qty in positions.items()
-                      if qty != 0 and t in self.contracts and t not in self._peak_prices]
-        prices = self._snapshot_prices(need_price) if need_price else {}
         for ticker, qty in positions.items():
-            if qty != 0 and ticker in self.contracts:
-                self._current_holdings.add(ticker)
-                if ticker not in self._peak_prices:
-                    p = prices.get(ticker, 0.0)
-                    if p > 0:
-                        self._peak_prices[ticker] = p
-                        log.info(f"  {ticker}: no persisted peak — set to current ${p:.2f}")
-                else:
-                    log.info(f"  {ticker}: peak restored from state ${self._peak_prices[ticker]:.2f}")
+            if qty == 0 or ticker not in self.contracts:
+                continue
+            self._current_holdings.add(ticker)
+            oid = self._stop_order_ids.get(ticker)
+            if oid and oid in open_ids:
+                log.info(f"  {ticker}: trailing stop active (orderId={oid})")
+            else:
+                log.info(f"  {ticker}: no active trailing stop — placing one now")
+                new_oid = self._place_trailing_stop(ticker, int(abs(qty)))
+                if new_oid:
+                    self._stop_order_ids[ticker] = new_oid
+
         log.info(f"Synced holdings: {sorted(self._current_holdings)}")
+        self._save_state()
 
     # ════════════════════════════════════════════════════════════════════════
     # PORTFOLIO / PRICE HELPERS
@@ -346,6 +390,49 @@ class KatanaStrategy:
         return self._snapshot_prices([ticker]).get(ticker, 0.0)
 
     # ════════════════════════════════════════════════════════════════════════
+    # TRAILING STOP MANAGEMENT  (IB-native GTC TRAIL orders)
+    # ════════════════════════════════════════════════════════════════════════
+    def _cancel_trailing_stop(self, ticker: str):
+        """Cancel the active GTC trailing stop for ticker, if one exists."""
+        oid = self._stop_order_ids.pop(ticker, None)
+        if oid is None:
+            return
+        for trade in self.ib.openTrades():
+            if trade.order.orderId == oid:
+                try:
+                    self.ib.cancelOrder(trade.order)
+                    self.ib.sleep(0.2)
+                    log.info(f"TRAIL STOP cancelled: {ticker}  (orderId={oid})")
+                except Exception as e:
+                    log.warning(f"Could not cancel trailing stop for {ticker}: {e}")
+                break
+
+    def _place_trailing_stop(self, ticker: str, qty: int) -> Optional[int]:
+        """Place a GTC trailing stop on IB's servers for the given quantity."""
+        if ticker not in self.contracts or qty <= 0:
+            return None
+        try:
+            order = Order(
+                action         = 'SELL',
+                orderType      = 'TRAIL',
+                totalQuantity  = abs(qty),
+                trailingPercent= round(self.TRAILING_STOP * 100, 2),
+                tif            = 'GTC',
+            )
+            trade = self.ib.placeOrder(self.contracts[ticker], order)
+            self.ib.sleep(0.3)
+            oid = trade.order.orderId
+            self._stop_order_ids[ticker] = oid
+            log.info(
+                f"TRAIL STOP placed: {ticker}  qty={abs(qty)}  "
+                f"trail={self.TRAILING_STOP:.1%}  orderId={oid}"
+            )
+            return oid
+        except Exception as e:
+            log.error(f"Failed to place trailing stop for {ticker}: {e}")
+            return None
+
+    # ════════════════════════════════════════════════════════════════════════
     # ORDER HELPERS
     # ════════════════════════════════════════════════════════════════════════
     def _set_holdings(
@@ -372,8 +459,10 @@ class KatanaStrategy:
 
         action = "BUY" if delta > 0 else "SELL"
         try:
+            self._cancel_trailing_stop(ticker)   # remove old stop before any size change
             self.ib.placeOrder(self.contracts[ticker], MarketOrder(action, abs(delta), tif='GTC'))
-            self.ib.sleep(0.1)
+            self.ib.sleep(1)                     # allow market order to fill before placing stop
+            self._place_trailing_stop(ticker, target_shares)
             log.info(
                 f"ORDER  {action} {abs(delta):>6} {ticker:<6}  "
                 f"~${price:.2f}  target {weight:.1%}"
@@ -390,6 +479,7 @@ class KatanaStrategy:
         if qty == 0 or ticker not in self.contracts:
             return False
         try:
+            self._cancel_trailing_stop(ticker)   # cancel stop before liquidating
             self.ib.placeOrder(self.contracts[ticker], MarketOrder("SELL", abs(qty), tif='GTC'))
             self.ib.sleep(0.1)
             log.info(f"LIQUIDATE  SELL {abs(qty)} {ticker}")
@@ -497,68 +587,10 @@ class KatanaStrategy:
         return result
 
     # ════════════════════════════════════════════════════════════════════════
-    # 1. TRAILING STOP CHECK  (daily, 9:40 AM ET)
-    # ════════════════════════════════════════════════════════════════════════
-    def _check_trailing_stops(self):
-        log.info("── Trailing stop check ──────────────────────────────")
-        if not self._current_holdings:
-            return
-
-        today     = self._today_et()
-        prices    = self._snapshot_prices(list(self._current_holdings))
-        positions = self._positions()
-        to_exit   = []
-
-        for ticker in list(self._current_holdings):
-            if positions.get(ticker, 0) == 0:
-                continue
-            current = prices.get(ticker) or self._single_price(ticker)
-            if not current or current <= 0:
-                continue
-
-            peak = self._peak_prices.get(ticker, current)
-            if current > peak:
-                self._peak_prices[ticker] = current
-                peak = current
-
-            drawdown = (peak - current) / peak if peak > 0 else 0.0
-            if drawdown >= self.TRAILING_STOP:
-                to_exit.append((ticker, peak, current, drawdown))
-
-        for ticker, peak, current, drawdown in to_exit:
-            self._liquidate(ticker, positions)
-            self._cooldown_until[ticker]  = today + timedelta(days=self.COOLDOWN_DAYS)
-            self._pending_realloc[ticker] = today + timedelta(days=self.REALLOCATION_DELAY_DAYS)
-            self._current_holdings.discard(ticker)
-            self._peak_prices.pop(ticker, None)
-            log.warning(
-                f"TRAILING STOP | {ticker} | "
-                f"Peak ${peak:.2f} → Now ${current:.2f} | "
-                f"Drawdown {drawdown*100:.1f}% | "
-                f"Cooldown until {self._cooldown_until[ticker]} | "
-                f"Realloc from {self._pending_realloc.get(ticker)}"
-            )
-        if to_exit:
-            self._save_state()   # persist cooldowns and removed peaks immediately
-
-    # ════════════════════════════════════════════════════════════════════════
-    # 2. DAILY CHECK  (daily, 10:00 AM ET)
+    # 1. DAILY CHECK  (daily, 10:00 AM ET)
     # ════════════════════════════════════════════════════════════════════════
     def _daily_check(self):
         today = self._today_et()
-
-        # Update peak prices for trailing stop tracking
-        if self._current_holdings:
-            prices    = self._snapshot_prices(list(self._current_holdings))
-            positions = self._positions()
-            for ticker in list(self._current_holdings):
-                if positions.get(ticker, 0) != 0:
-                    p = prices.get(ticker, 0.0)
-                    if p > 0:
-                        self._peak_prices[ticker] = max(
-                            self._peak_prices.get(ticker, p), p
-                        )
-            self._save_state()   # persist updated peaks so restarts don't lose them
 
         # Rebalance decision
         if self._next_rebal_date is None or today >= self._next_rebal_date:
@@ -705,7 +737,6 @@ class KatanaStrategy:
         for ticker, qty in list(positions.items()):
             if qty != 0 and ticker not in final_selected:
                 self._liquidate(ticker, positions)
-                self._peak_prices.pop(ticker, None)
                 self._pending_realloc.pop(ticker, None)
 
         self.ib.sleep(2)
@@ -713,17 +744,12 @@ class KatanaStrategy:
         positions = self._positions()
         prices_all = self._snapshot_prices(list(final_selected))
 
-        # Enter / adjust positions
+        # Enter / adjust positions  (_set_holdings handles stop cancel + re-place)
         for ticker in final_selected:
             w = weights.get(ticker, 0.0)
             if w <= 0:
                 continue
-            is_new = ticker not in self._current_holdings
             self._set_holdings(ticker, w, pv, prices_all, positions)
-            if is_new:
-                p = prices_all.get(ticker, 0.0)
-                if p > 0:
-                    self._peak_prices[ticker] = p
 
         self._current_holdings = set(final_selected)
         for t in final_selected:
@@ -753,11 +779,12 @@ class KatanaStrategy:
 
     def _save_state(self):
         state = {
-            "last_rebalanced": str(self._last_rebalanced) if self._last_rebalanced else None,
-            "next_rebalance":  str(self._next_rebal_date)  if self._next_rebal_date  else None,
-            "cooldown_until":  {t: str(d) for t, d in self._cooldown_until.items()},
-            "pending_realloc": {t: str(d) for t, d in self._pending_realloc.items()},
-            "peak_prices":     dict(self._peak_prices),
+            "last_rebalanced":  str(self._last_rebalanced) if self._last_rebalanced else None,
+            "next_rebalance":   str(self._next_rebal_date)  if self._next_rebal_date  else None,
+            "cooldown_until":   {t: str(d) for t, d in self._cooldown_until.items()},
+            "pending_realloc":  {t: str(d) for t, d in self._pending_realloc.items()},
+            "stop_order_ids":   dict(self._stop_order_ids),
+            "current_holdings": list(self._current_holdings),
         }
         try:
             with open(self._STATE_FILE, "w") as f:
@@ -783,8 +810,10 @@ class KatanaStrategy:
                 self._pending_realloc = {
                     t: date.fromisoformat(d) for t, d in state["pending_realloc"].items()
                 }
-            if state.get("peak_prices"):
-                self._peak_prices = {t: float(p) for t, p in state["peak_prices"].items()}
+            if state.get("stop_order_ids"):
+                self._stop_order_ids = {t: int(oid) for t, oid in state["stop_order_ids"].items()}
+            if state.get("current_holdings"):
+                self._current_holdings = set(state["current_holdings"])
             log.info(
                 f"State loaded — last rebalanced: {self._last_rebalanced}, "
                 f"next rebalance: {self._next_rebal_date}"
@@ -1120,7 +1149,6 @@ class KatanaStrategy:
             today = now.date()
 
             if self._last_event_date != today:
-                self._stop_checked_today  = False
                 self._daily_checked_today = False
                 self._last_event_date     = today
 
@@ -1138,19 +1166,7 @@ class KatanaStrategy:
             if not self._is_weekday(today):
                 continue
 
-            market_open      = now.replace(hour=9, minute=30, second=0, microsecond=0)
-            stop_check_time  = market_open + timedelta(minutes=10)   # 9:40 AM ET
-            daily_check_time = market_open + timedelta(minutes=30)   # 10:00 AM ET
-
-            # If offline at 9:40 and reconnect at e.g. 9:55, flag is still False
-            # so both events fire immediately on catch-up.
-            if not self._stop_checked_today and now >= stop_check_time:
-                try:
-                    self._check_trailing_stops()
-                except Exception as e:
-                    log.error(f"Trailing stop error: {e}", exc_info=True)
-                finally:
-                    self._stop_checked_today = True
+            daily_check_time = now.replace(hour=10, minute=0, second=0, microsecond=0)
 
             if not self._daily_checked_today and now >= daily_check_time:
                 try:
