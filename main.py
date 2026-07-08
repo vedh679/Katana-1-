@@ -20,7 +20,7 @@ import logging
 import math
 import sys
 import time
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time as dtime
 from typing import Dict, List, Optional, Set
 
 import numpy as np
@@ -93,6 +93,9 @@ class KatanaStrategy:
         self.IB_PORT         = config.IB_PORT
         self.IB_CLIENT_ID    = config.IB_CLIENT_ID
         self.RECONNECT_DELAY = config.RECONNECT_DELAY
+        # Nightly Gateway-restart avoidance (machine LOCAL time)
+        self.DAILY_PAUSE_START = self._parse_hhmm(config.DAILY_PAUSE_START)
+        self.DAILY_PAUSE_END   = self._parse_hhmm(config.DAILY_PAUSE_END)
         # Rebalancing
         self.REBALANCE_EVERY_DAYS    = config.REBALANCE_EVERY_DAYS
         # Risk
@@ -118,8 +121,15 @@ class KatanaStrategy:
             f"Port: {self.IB_PORT} ({'PAPER' if self.IB_PORT == 4002 else 'LIVE'}) | "
             f"Rebal every {self.REBALANCE_EVERY_DAYS}d | "
             f"Stop: {self.TRAILING_STOP:.1%} | "
-            f"Lookback: {self.LOOKBACK}d / skip {self.SKIP}d"
+            f"Lookback: {self.LOOKBACK}d / skip {self.SKIP}d | "
+            f"Nightly pause (local): {config.DAILY_PAUSE_START}–{config.DAILY_PAUSE_END}"
         )
+
+    @staticmethod
+    def _parse_hhmm(s: str) -> dtime:
+        """Parse a 'HH:MM' 24-hour string into a datetime.time."""
+        h, m = str(s).strip().split(":")
+        return dtime(int(h), int(m))
 
     def _build_universe(self):
         raw = list(dict.fromkeys(
@@ -141,7 +151,7 @@ class KatanaStrategy:
         self._last_log_date:    Optional[date]    = None
         self._daily_checked_today = False
         self._last_event_date:  Optional[date]   = None
-        self._last_pnl_time:    Optional[datetime] = None
+        self._last_pnl_date:    Optional[date]   = None   # date of last 5 PM ET P&L print
         # IB historical data caches (populated by _fetch_universe_history)
         self._close_cache:  pd.DataFrame = pd.DataFrame()
         self._volume_cache: pd.DataFrame = pd.DataFrame()
@@ -772,6 +782,10 @@ class KatanaStrategy:
             )
 
         self._display_holdings(weights, prices_all, pv, bullish)
+        try:
+            self._display_pnl()   # portfolio value / P&L snapshot at each rebalance
+        except Exception:
+            pass
 
     # ════════════════════════════════════════════════════════════════════════
     # STATE PERSISTENCE
@@ -857,13 +871,21 @@ class KatanaStrategy:
         """Return a human-readable next-rebalance string, skipping weekends."""
         d = self._next_rebal_date
         first_run = d is None
-        if d is None:
+        overdue = d is not None and d < today
+        if d is None or d < today:
+            # No prior schedule (first run) or the algo was offline past the
+            # scheduled date — it's due at the next 10:00 AM ET check.
             d = today
         while d.weekday() >= 5:   # Saturday=5, Sunday=6 → advance to Monday
             d += timedelta(days=1)
         days = (d - today).days
         when = "TODAY" if days == 0 else f"in {days} day{'s' if days != 1 else ''}"
-        suffix = "  (first run)" if first_run else ""
+        if overdue:
+            suffix = "  (overdue — runs at next check)"
+        elif first_run:
+            suffix = "  (first run)"
+        else:
+            suffix = ""
         return f"{d}  ({when})  10:00 AM ET{suffix}"
 
     def _display_startup(self):
@@ -893,7 +915,9 @@ class KatanaStrategy:
         print("─" * W)
         print(f"  Last rebalanced : {self._last_rebalanced or 'Never'}")
         print(f"  Next rebalance  : {self._rebal_display_str(today)}")
-        print(f"  P&L refresh     : every 10 min")
+        print(f"  P&L refresh     : at rebalance + daily 5:00 PM ET")
+        print(f"  Nightly pause   : {self.DAILY_PAUSE_START.strftime('%H:%M')}–"
+              f"{self.DAILY_PAUSE_END.strftime('%H:%M')} local (Gateway restart)")
         print("═" * W + "\n")
 
     def _display_holdings(self, weights: dict, prices: dict, pv: float, bullish: bool):
@@ -911,7 +935,7 @@ class KatanaStrategy:
             print(f"  {ticker:<8}  {wt:>6.1%}  {shares:>8,}  {price:>10.2f}  {value:>11,.0f}")
         print("─" * W)
         print(f"  Next rebalance : {self._rebal_display_str(self._today_et())}")
-        print(f"  P&L refresh    : every 10 min")
+        print(f"  P&L refresh    : at rebalance + daily 5:00 PM ET")
         print("═" * W + "\n")
 
     def _portfolio_metrics(self, items: dict, positions: dict):
@@ -1094,6 +1118,23 @@ class KatanaStrategy:
     def _is_weekday(self, d: date) -> bool:
         return d.weekday() < 5   # Mon=0 … Fri=4
 
+    def _in_local_pause_window(self) -> bool:
+        """
+        True when the machine's LOCAL wall-clock time is inside the nightly
+        pause window. Local time is used (not ET) because the IB Gateway
+        auto-restart is scheduled on the machine's local clock.
+        """
+        now_t = datetime.now().time()   # naive → machine local time
+        start, end = self.DAILY_PAUSE_START, self.DAILY_PAUSE_END
+        if start <= end:
+            return start <= now_t < end
+        return now_t >= start or now_t < end   # window crosses midnight
+
+    def _wait_out_pause_window(self):
+        """Block (interruptibly) until the local pause window has ended."""
+        while self._in_local_pause_window():
+            time.sleep(15)
+
     # ════════════════════════════════════════════════════════════════════════
     # MAIN RUN LOOP — 24/7, reconnects automatically on IB Gateway restart
     # ════════════════════════════════════════════════════════════════════════
@@ -1101,7 +1142,9 @@ class KatanaStrategy:
         """
         Entry point. Runs forever. Handles:
           - Initial connection (retries until Gateway is up)
-          - Automatic reconnection on the IB Gateway daily restart (~11:45 PM ET)
+          - A scheduled nightly pause (local DAILY_PAUSE_START–DAILY_PAUSE_END)
+            that disconnects around the IB Gateway auto-restart and reconnects
+          - Automatic reconnection on any unexpected IB Gateway disconnect
           - All strategy state preserved in memory across disconnects
           - Catch-up on any scheduled events missed during an outage
         """
@@ -1134,6 +1177,22 @@ class KatanaStrategy:
         """
         log.info("Event loop active — waiting for market events ...")
         while True:
+            # ── Nightly pause: disconnect around the IB Gateway restart ────
+            # Runs on the machine's LOCAL clock (e.g. 11:00–11:30 PM) so it
+            # straddles the Gateway's ~11:11 PM auto-restart. We disconnect,
+            # wait out the window, then return so run() reconnects cleanly.
+            if self._in_local_pause_window():
+                log.info(
+                    f"Nightly pause window ({self.DAILY_PAUSE_START.strftime('%H:%M')}–"
+                    f"{self.DAILY_PAUSE_END.strftime('%H:%M')} local) — disconnecting to "
+                    f"avoid IB Gateway restart. Reconnecting at "
+                    f"{self.DAILY_PAUSE_END.strftime('%H:%M')} local."
+                )
+                self._disconnect_safe()
+                self._wait_out_pause_window()
+                log.info("Nightly pause window ended — reconnecting to IB Gateway ...")
+                return   # back to run(), which reconnects via _connect()
+
             if not self.ib.isConnected():
                 log.warning("IB connection lost — entering reconnect loop ...")
                 self._reconnect_loop()
@@ -1153,16 +1212,14 @@ class KatanaStrategy:
                 self._daily_checked_today = False
                 self._last_event_date     = today
 
-            # ── P&L display every 10 minutes ──────────────────────────────
-            if self._current_holdings and (
-                self._last_pnl_time is None
-                or (now - self._last_pnl_time).total_seconds() >= 600
-            ):
+            # ── P&L display once daily at 5:00 PM ET (after US close) ──────
+            pnl_time_et = now.replace(hour=17, minute=0, second=0, microsecond=0)
+            if self._last_pnl_date != today and now >= pnl_time_et:
                 try:
                     self._display_pnl()
                 except Exception:
                     pass
-                self._last_pnl_time = now
+                self._last_pnl_date = today
 
             if not self._is_weekday(today):
                 continue

@@ -18,7 +18,9 @@
       "Bash(Get-Content *)",
       "Bash(git checkout *)",
       "Bash(git merge *)",
-      "Bash(git branch *)"
+      "Bash(git branch *)",
+      "Bash(python -m py_compile main.py config.py)",
+      "Bash(python -c ' *)"
     ]
   }
 }

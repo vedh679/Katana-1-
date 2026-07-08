@@ -14,6 +14,14 @@ IB_PORT         = 4002      # 4001 = live account  |  4002 = paper account
 IB_CLIENT_ID    = 2         # must be unique if multiple scripts run at once
 RECONNECT_DELAY = 30        # seconds to wait between reconnection attempts
 
+# ── Nightly Gateway-restart avoidance (machine LOCAL time, 24h "HH:MM") ────────
+# The IB Gateway auto-restarts once per day (default ~11:11 PM). The algorithm
+# disconnects at DAILY_PAUSE_START and reconnects at DAILY_PAUSE_END so it never
+# meets the restart mid-operation. These are the MACHINE'S LOCAL clock times
+# (NOT US/Eastern) — that is the clock the Gateway restart itself uses.
+DAILY_PAUSE_START = "23:00"     # disconnect at 11:00 PM local
+DAILY_PAUSE_END   = "23:30"     # reconnect at 11:30 PM local
+
 
 # ── Rebalancing schedule ──────────────────────────────────────────────────────
 REBALANCE_EVERY_DAYS = 4    # calendar days between rebalances
